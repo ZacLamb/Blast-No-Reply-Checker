@@ -1,0 +1,15 @@
+{
+  "name": "blast-no-reply-finder",
+  "version": "1.0.0",
+  "description": "Finds the most recent SMS blast in a GHL sub-account and tags everyone who has not replied to it.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

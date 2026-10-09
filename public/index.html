@@ -1,0 +1,310 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Blast No-Reply Finder</title>
+<style>
+  :root {
+    --bg: #f5f6f8; --card: #ffffff; --ink: #14181f; --muted: #5d6675; --line: #dfe3ea;
+    --accent: #1f5eff; --accent-ink: #ffffff; --ok: #0d7a4f; --bad: #b3261e; --soft: #eef2ff;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1218; --card: #181c25; --ink: #eef1f6; --muted: #9aa4b5; --line: #2a3040;
+      --accent: #6d93ff; --accent-ink: #0b1020; --ok: #4fd3a0; --bad: #ff8a80; --soft: #1e2740;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 760px; margin: 0 auto; padding: 32px 16px 80px; }
+  h1 { font-size: 26px; margin: 0 0 4px; letter-spacing: -0.01em; }
+  .lede { color: var(--muted); margin: 0 0 24px; }
+  section { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 20px; margin-bottom: 16px; }
+  h2 { font-size: 15px; margin: 0 0 14px; display: flex; align-items: center; gap: 10px; }
+  h2 .n { width: 24px; height: 24px; border-radius: 50%; background: var(--soft); color: var(--accent); display: grid; place-items: center; font-size: 13px; }
+  label { display: block; font-size: 13px; font-weight: 600; margin: 0 0 6px; }
+  .hint { font-weight: 400; color: var(--muted); }
+  input[type=text], input[type=password], input[type=number], select {
+    width: 100%; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px;
+    background: var(--bg); color: var(--ink); font: inherit;
+  }
+  input:focus, select:focus, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px; }
+  @media (max-width: 560px) { .row { grid-template-columns: 1fr; } }
+  .check { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 400; color: var(--muted); margin: 0 0 14px; }
+  button { font: inherit; font-weight: 600; border: 0; border-radius: 8px; padding: 11px 18px; cursor: pointer; background: var(--accent); color: var(--accent-ink); }
+  button.ghost { background: transparent; color: var(--accent); border: 1px solid var(--line); }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  .actions { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+  .status { color: var(--muted); font-size: 14px; }
+  .error { color: var(--bad); font-size: 14px; margin-top: 12px; }
+  .done { color: var(--ok); font-weight: 600; margin-top: 12px; }
+  .blast { display: flex; gap: 12px; align-items: flex-start; border: 1px solid var(--line); border-radius: 10px; padding: 14px; margin-bottom: 10px; cursor: pointer; }
+  .blast.on { border-color: var(--accent); background: var(--soft); }
+  .blast input { margin-top: 4px; }
+  .blast .when { font-weight: 600; }
+  .blast .count { color: var(--muted); font-size: 14px; }
+  .blast .sample { font-size: 14px; margin-top: 6px; overflow-wrap: anywhere; }
+  .badge { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; color: var(--accent); margin-left: 8px; }
+  details { margin-top: 14px; font-size: 14px; }
+  summary { cursor: pointer; color: var(--muted); }
+  .tablewrap { overflow: auto; max-height: 330px; margin: 14px 0; border: 1px solid var(--line); border-radius: 8px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th, td { white-space: nowrap; }
+  th { color: var(--muted); font-weight: 600; position: sticky; top: 0; background: var(--card); }
+  tr:last-child td { border-bottom: 0; }
+  td.msg { min-width: 240px; white-space: normal; overflow-wrap: anywhere; }
+  progress { width: 100%; height: 10px; margin-top: 12px; accent-color: var(--accent); }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Blast No-Reply Finder</h1>
+  <p class="lede">Finds your most recent SMS blast, lists everyone who hasn't replied to it, and tags them so you can resend from GHL.</p>
+
+  <section>
+    <h2><span class="n">1</span> Connect the sub-account</h2>
+    <div class="row">
+      <div>
+        <label for="loc">Location ID <span class="hint">(Settings → Business Profile)</span></label>
+        <input id="loc" type="text" autocomplete="off" spellcheck="false">
+      </div>
+      <div>
+        <label for="tok">Private Integration token <span class="hint">(starts with pit-)</span></label>
+        <input id="tok" type="password" autocomplete="off" spellcheck="false">
+      </div>
+    </div>
+    <div class="row">
+      <div>
+        <label for="days">Look back</label>
+        <select id="days">
+          <option value="3">3 days</option>
+          <option value="7" selected>7 days</option>
+          <option value="14">14 days</option>
+          <option value="30">30 days</option>
+          <option value="60">60 days</option>
+        </select>
+      </div>
+      <div></div>
+    </div>
+    <label class="check"><input id="remember" type="checkbox" checked> Remember these on this browser</label>
+    <div class="actions">
+      <button id="scanBtn">Find recent blasts</button>
+      <span id="scanStatus" class="status"></span>
+    </div>
+    <div id="scanError" class="error" hidden></div>
+  </section>
+
+  <section id="blastSection" hidden>
+    <h2><span class="n">2</span> Pick the blast</h2>
+    <div id="blastList"></div>
+    <div id="noBlasts" class="status" hidden></div>
+    <details>
+      <summary>Not seeing the right blast?</summary>
+      <p class="status">A blast is detected as a run of texts sent close together. Loosen these if your blast drips out slowly or was small.</p>
+      <div class="row">
+        <div>
+          <label for="gap">Max gap between texts (minutes)</label>
+          <input id="gap" type="number" min="1" max="240" value="10">
+        </div>
+        <div>
+          <label for="min">Smallest blast to show (contacts)</label>
+          <input id="min" type="number" min="2" value="20">
+        </div>
+      </div>
+      <button id="regroup" class="ghost">Regroup</button>
+    </details>
+  </section>
+
+  <section id="tagSection" hidden>
+    <h2><span class="n">3</span> Tag everyone who hasn't replied</h2>
+    <div class="row">
+      <div>
+        <label for="tag">Tag to add</label>
+        <input id="tag" type="text" autocomplete="off" spellcheck="false">
+      </div>
+      <div>
+        <label for="contains">Only texts containing <span class="hint">(optional)</span></label>
+        <input id="contains" type="text" autocomplete="off" placeholder="a phrase from the blast">
+      </div>
+    </div>
+    <div id="countLine" class="status"></div>
+    <div class="tablewrap"><table>
+      <thead><tr><th>Name</th><th>Phone</th><th>Sent</th><th>Last text</th></tr></thead>
+      <tbody id="preview"></tbody>
+    </table></div>
+    <div class="actions">
+      <button id="tagBtn">Tag contacts</button>
+      <button id="csvBtn" class="ghost">Download CSV</button>
+    </div>
+    <progress id="bar" value="0" max="1" hidden></progress>
+    <div id="tagStatus" class="status"></div>
+    <div id="tagDone" class="done" hidden></div>
+    <div id="tagError" class="error" hidden></div>
+  </section>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+let scanId = null, blasts = [], picked = null, tagging = false;
+
+try {
+  const saved = JSON.parse(localStorage.getItem('bnrf') || '{}');
+  if (saved.loc) $('loc').value = saved.loc;
+  if (saved.tok) $('tok').value = saved.tok;
+} catch (e) {}
+
+function remember() {
+  try {
+    if ($('remember').checked) localStorage.setItem('bnrf', JSON.stringify({ loc: $('loc').value.trim(), tok: $('tok').value.trim() }));
+    else localStorage.removeItem('bnrf');
+  } catch (e) {}
+}
+
+async function api(url, opts) {
+  const res = await fetch(url, opts);
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || ('Request failed (' + res.status + ')'));
+  return data;
+}
+const post = (url, body) => api(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+const creds = () => ({ token: $('tok').value.trim(), locationId: $('loc').value.trim() });
+
+function show(el, text) { el.textContent = text; el.hidden = !text; }
+const fmtDay = (ts) => new Date(ts).toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
+const fmtTime = (ts) => new Date(ts).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+function fmtRange(b) {
+  const sameDay = new Date(b.from).toDateString() === new Date(b.to).toDateString();
+  if (b.to - b.from < 60000) return fmtDay(b.from) + ', ' + fmtTime(b.from);
+  return fmtDay(b.from) + ', ' + fmtTime(b.from) + ' – ' + (sameDay ? '' : fmtDay(b.to) + ', ') + fmtTime(b.to);
+}
+
+$('scanBtn').onclick = async () => {
+  const c = creds();
+  show($('scanError'), '');
+  if (!c.token || !c.locationId) return show($('scanError'), 'Enter the Location ID and the token first.');
+  remember();
+  $('scanBtn').disabled = true;
+  $('blastSection').hidden = true; $('tagSection').hidden = true;
+  $('scanStatus').textContent = 'Starting…';
+  try {
+    const r = await post('/api/scan', { ...c, days: Number($('days').value) });
+    scanId = r.scanId;
+    for (;;) {
+      await sleep(1200);
+      const s = await api('/api/scan/' + scanId);
+      if (s.status === 'error') throw new Error(s.error);
+      $('scanStatus').textContent = 'Checked ' + s.scanned.toLocaleString() + ' conversations…';
+      if (s.status === 'done') break;
+    }
+    await loadBlasts();
+  } catch (e) {
+    $('scanStatus').textContent = '';
+    show($('scanError'), e.message);
+  } finally {
+    $('scanBtn').disabled = false;
+  }
+};
+
+async function loadBlasts() {
+  const r = await api('/api/scan/' + scanId + '/blasts?gap=' + encodeURIComponent($('gap').value) + '&min=' + encodeURIComponent($('min').value));
+  blasts = r.blasts;
+  $('scanStatus').textContent = r.total.toLocaleString() + ' conversations end on an unanswered text.';
+  $('blastSection').hidden = false;
+  const list = $('blastList');
+  list.textContent = '';
+  show($('noBlasts'), blasts.length ? '' : 'No blast found in this window. Try a longer look-back above, or loosen the settings below.');
+  blasts.forEach((b, i) => {
+    const row = document.createElement('label');
+    row.className = 'blast';
+    const radio = document.createElement('input');
+    radio.type = 'radio'; radio.name = 'blast'; radio.value = i;
+    radio.onchange = () => pick(i);
+    const body = document.createElement('div');
+    const when = document.createElement('div'); when.className = 'when'; when.textContent = fmtRange(b);
+    if (i === 0) { const badge = document.createElement('span'); badge.className = 'badge'; badge.textContent = 'Most recent'; when.appendChild(badge); }
+    const count = document.createElement('div'); count.className = 'count';
+    count.textContent = b.count.toLocaleString() + ' contacts have not replied';
+    const sample = document.createElement('div'); sample.className = 'sample'; sample.textContent = '“' + b.sample + '”';
+    body.append(when, count, sample);
+    row.append(radio, body);
+    list.appendChild(row);
+  });
+  if (blasts.length) { list.querySelector('input').checked = true; pick(0); } else { $('tagSection').hidden = true; }
+}
+$('regroup').onclick = () => loadBlasts().catch((e) => show($('noBlasts'), e.message));
+
+function defaultTag(b) {
+  const d = new Date(b.to);
+  return 'no-reply-' + d.toLocaleDateString('en-US', { month: 'short' }).toLowerCase() + '-' + d.getDate();
+}
+
+function pick(i) {
+  picked = blasts[i];
+  document.querySelectorAll('.blast').forEach((el, n) => el.classList.toggle('on', n === i));
+  $('tag').value = defaultTag(picked);
+  $('contains').value = '';
+  $('tagSection').hidden = false;
+  show($('tagDone'), ''); show($('tagError'), ''); $('tagStatus').textContent = ''; $('bar').hidden = true;
+  refreshContacts();
+}
+
+const rangeQs = () => 'from=' + picked.from + '&to=' + picked.to + '&contains=' + encodeURIComponent($('contains').value.trim());
+
+let refreshTimer = null;
+$('contains').oninput = () => { clearTimeout(refreshTimer); refreshTimer = setTimeout(refreshContacts, 250); };
+
+async function refreshContacts() {
+  if (!picked) return;
+  try {
+    const r = await api('/api/scan/' + scanId + '/contacts?' + rangeQs());
+    $('countLine').textContent = r.count.toLocaleString() + ' contacts will be tagged' + (r.count > r.preview.length ? ' (showing the first ' + r.preview.length + ')' : '') + '.';
+    $('tagBtn').textContent = 'Tag ' + r.count.toLocaleString() + ' contacts';
+    $('tagBtn').disabled = tagging || r.count === 0;
+    const tb = $('preview');
+    tb.textContent = '';
+    r.preview.forEach((c) => {
+      const tr = document.createElement('tr');
+      [c.name || '—', c.phone || '—', fmtDay(c.ts) + ' ' + fmtTime(c.ts), c.body].forEach((v, n) => {
+        const td = document.createElement('td'); td.textContent = v; if (n === 3) td.className = 'msg'; tr.appendChild(td);
+      });
+      tb.appendChild(tr);
+    });
+  } catch (e) { show($('tagError'), e.message); }
+}
+
+$('csvBtn').onclick = () => { if (picked) window.location = '/api/scan/' + scanId + '/contacts.csv?' + rangeQs(); };
+
+$('tagBtn').onclick = async () => {
+  const tag = $('tag').value.trim();
+  show($('tagDone'), ''); show($('tagError'), '');
+  if (!tag) return show($('tagError'), 'Enter a tag name.');
+  tagging = true; $('tagBtn').disabled = true;
+  try {
+    const r = await post('/api/scan/' + scanId + '/tag', { ...creds(), tag, from: picked.from, to: picked.to, contains: $('contains').value.trim() });
+    $('bar').hidden = false; $('bar').max = r.total; $('bar').value = 0;
+    for (;;) {
+      await sleep(1000);
+      const j = await api('/api/tag/' + r.jobId);
+      $('bar').value = j.done + j.failed;
+      $('tagStatus').textContent = 'Tagged ' + j.done.toLocaleString() + ' of ' + j.total.toLocaleString() + (j.failed ? ' · ' + j.failed + ' failed' : '');
+      if (j.status === 'error') throw new Error(j.error);
+      if (j.status === 'done') {
+        show($('tagDone'), 'Done. In GHL go to Contacts, filter by Tag is "' + j.tag + '", select all and send your resend.');
+        if (j.failed) show($('tagError'), j.failed + ' contacts could not be tagged. Last error: ' + (j.lastError || 'unknown') + '. Clicking the button again is safe; tagging twice has no effect.');
+        break;
+      }
+    }
+  } catch (e) {
+    show($('tagError'), e.message);
+  } finally {
+    tagging = false; $('tagBtn').disabled = false;
+  }
+};
+</script>
+</body>
+</html>
