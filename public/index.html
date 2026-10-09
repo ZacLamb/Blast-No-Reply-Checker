@@ -63,7 +63,7 @@
 <body>
 <main>
   <h1>Blast No-Reply Finder</h1>
-  <p class="lede">Finds your most recent SMS blast, lists everyone who hasn't replied to it, and tags them so you can resend from GHL.</p>
+  <p class="lede">Finds your most recent SMS blast, checks each contact's message history, and tags everyone who hasn't replied so you can resend from GHL.</p>
 
   <section>
     <h2><span class="n">1</span> Connect the sub-account</h2>
@@ -90,6 +90,7 @@
       </div>
       <div></div>
     </div>
+    <p class="status" style="margin:0 0 12px">Token scopes needed: conversations.readonly, conversations/message.readonly, contacts.write.</p>
     <label class="check"><input id="remember" type="checkbox" checked> Remember these on this browser</label>
     <div class="actions">
       <button id="scanBtn">Find recent blasts</button>
@@ -123,6 +124,16 @@
     <h2><span class="n">3</span> Tag everyone who hasn't replied</h2>
     <div class="row">
       <div>
+        <label for="mode">Leave out</label>
+        <select id="mode">
+          <option value="ever" selected>Anyone who has ever replied</option>
+          <option value="since">Only people who replied since this blast</option>
+        </select>
+      </div>
+      <div></div>
+    </div>
+    <div class="row">
+      <div>
         <label for="tag">Tag to add</label>
         <input id="tag" type="text" autocomplete="off" spellcheck="false">
       </div>
@@ -150,7 +161,7 @@
 <script>
 const $ = (id) => document.getElementById(id);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-let scanId = null, blasts = [], picked = null, tagging = false;
+let scanId = null, blasts = [], picked = null, tagging = false, checking = false, pickSeq = 0;
 
 try {
   const saved = JSON.parse(localStorage.getItem('bnrf') || '{}');
@@ -228,7 +239,7 @@ async function loadBlasts() {
     const when = document.createElement('div'); when.className = 'when'; when.textContent = fmtRange(b);
     if (i === 0) { const badge = document.createElement('span'); badge.className = 'badge'; badge.textContent = 'Most recent'; when.appendChild(badge); }
     const count = document.createElement('div'); count.className = 'count';
-    count.textContent = b.count.toLocaleString() + ' contacts have not replied';
+    count.textContent = b.count.toLocaleString() + ' contacts still end on this text';
     const sample = document.createElement('div'); sample.className = 'sample'; sample.textContent = '“' + b.sample + '”';
     body.append(when, count, sample);
     row.append(radio, body);
@@ -243,26 +254,55 @@ function defaultTag(b) {
   return 'no-reply-' + d.toLocaleDateString('en-US', { month: 'short' }).toLowerCase() + '-' + d.getDate();
 }
 
-function pick(i) {
+async function pick(i) {
   picked = blasts[i];
+  const seq = ++pickSeq;
   document.querySelectorAll('.blast').forEach((el, n) => el.classList.toggle('on', n === i));
   $('tag').value = defaultTag(picked);
   $('contains').value = '';
   $('tagSection').hidden = false;
   show($('tagDone'), ''); show($('tagError'), ''); $('tagStatus').textContent = ''; $('bar').hidden = true;
+  $('preview').textContent = '';
+  // Read each contact's message history so anyone who replied is left out.
+  checking = true; $('tagBtn').disabled = true; $('csvBtn').disabled = true;
+  $('tagBtn').textContent = 'Tag contacts';
+  $('countLine').textContent = 'Checking reply history…';
+  try {
+    const r = await post('/api/scan/' + scanId + '/verify', { ...creds(), from: picked.from, to: picked.to });
+    for (;;) {
+      const j = await api('/api/verify/' + r.jobId);
+      if (seq !== pickSeq) return;
+      if (j.status === 'error') throw new Error(j.error);
+      if (j.status === 'done') {
+        if (j.failed) show($('tagError'), j.failed + ' contacts could not be checked and are left out. Last error: ' + (j.lastError || 'unknown') + '. Pick the blast again to retry them.');
+        break;
+      }
+      $('countLine').textContent = 'Checking reply history: ' + (j.done + j.failed).toLocaleString() + ' of ' + j.total.toLocaleString() + '…';
+      await sleep(800);
+    }
+  } catch (e) {
+    if (seq !== pickSeq) return;
+    checking = false;
+    $('countLine').textContent = '';
+    return show($('tagError'), e.message);
+  }
+  checking = false; $('csvBtn').disabled = false;
   refreshContacts();
 }
 
-const rangeQs = () => 'from=' + picked.from + '&to=' + picked.to + '&contains=' + encodeURIComponent($('contains').value.trim());
+const rangeQs = () => 'from=' + picked.from + '&to=' + picked.to + '&mode=' + $('mode').value + '&contains=' + encodeURIComponent($('contains').value.trim());
+$('mode').onchange = () => { if (!checking) refreshContacts(); };
 
 let refreshTimer = null;
 $('contains').oninput = () => { clearTimeout(refreshTimer); refreshTimer = setTimeout(refreshContacts, 250); };
 
 async function refreshContacts() {
-  if (!picked) return;
+  if (!picked || checking) return;
   try {
     const r = await api('/api/scan/' + scanId + '/contacts?' + rangeQs());
-    $('countLine').textContent = r.count.toLocaleString() + ' contacts will be tagged' + (r.count > r.preview.length ? ' (showing the first ' + r.preview.length + ')' : '') + '.';
+    $('countLine').textContent = r.count.toLocaleString() + ' contacts will be tagged' + (r.count > r.preview.length ? ' (showing the first ' + r.preview.length + ')' : '') + '. '
+      + r.replied.toLocaleString() + ' left out because they replied' + ($('mode').value === 'since' ? ' since this blast' : ' at some point') + '.'
+      + (r.unchecked ? ' ' + r.unchecked.toLocaleString() + ' left out because they could not be checked.' : '');
     $('tagBtn').textContent = 'Tag ' + r.count.toLocaleString() + ' contacts';
     $('tagBtn').disabled = tagging || r.count === 0;
     const tb = $('preview');
@@ -285,7 +325,7 @@ $('tagBtn').onclick = async () => {
   if (!tag) return show($('tagError'), 'Enter a tag name.');
   tagging = true; $('tagBtn').disabled = true;
   try {
-    const r = await post('/api/scan/' + scanId + '/tag', { ...creds(), tag, from: picked.from, to: picked.to, contains: $('contains').value.trim() });
+    const r = await post('/api/scan/' + scanId + '/tag', { ...creds(), tag, from: picked.from, to: picked.to, mode: $('mode').value, contains: $('contains').value.trim() });
     $('bar').hidden = false; $('bar').max = r.total; $('bar').value = 0;
     for (;;) {
       await sleep(1000);
@@ -302,7 +342,7 @@ $('tagBtn').onclick = async () => {
   } catch (e) {
     show($('tagError'), e.message);
   } finally {
-    tagging = false; $('tagBtn').disabled = false;
+    tagging = false; $('tagBtn').disabled = checking;
   }
 };
 </script>

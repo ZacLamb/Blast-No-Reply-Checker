@@ -1,8 +1,8 @@
 // Blast No-Reply Finder
 // Scans a GHL sub-account for conversations whose LAST message is an outbound
 // SMS, groups them into bursts (a blast = many texts sent close together),
-// and tags everyone in the chosen burst. Anyone who replied is automatically
-// excluded, because their conversation no longer ends on the blast text.
+// reads each contact's message history to drop anyone who has replied, and
+// tags the rest.
 //
 // No database and no env vars required. The GHL token is supplied by the page
 // on each request and is never written to disk.
@@ -58,9 +58,10 @@ async function ghl(token, method, pathAndQuery, version, body) {
     try { data = JSON.parse(text); } catch { data = { raw: text }; }
     if (!res.ok) {
       const detail = Array.isArray(data.message) ? data.message.join(', ') : (data.message || data.error || text.slice(0, 200));
-      let msg = `GHL returned ${res.status}: ${detail}`;
-      if (res.status === 401) msg = 'GHL rejected the token (401). Check that the Private Integration token is correct and belongs to this sub-account.';
-      if (res.status === 403) msg = `GHL refused access (403): ${detail}. Check the token's scopes and that the Location ID matches the token's sub-account.`;
+      const d = String(detail).replace(/\.+$/, '');
+      let msg = `GHL returned ${res.status}: ${d}`;
+      if (res.status === 401) msg = `GHL rejected the token (401): ${d}. Check that the Private Integration token is correct, belongs to this sub-account, and has all three scopes: conversations.readonly, conversations/message.readonly, contacts.write.`;
+      if (res.status === 403) msg = `GHL refused access (403): ${d}. Check the token's scopes and that the Location ID matches the token's sub-account.`;
       const e = new Error(msg);
       e.status = res.status;
       throw e;
@@ -110,7 +111,10 @@ async function runScan(scan, { token, locationId, days }) {
           fresh++;
           if (ts >= cutoff && c.contactId && c.lastMessageDirection !== 'inbound') {
             items.push({
+              conversationId: c.id,
               contactId: c.contactId,
+              checked: false,    // has the message history been read yet?
+              lastInbound: null, // time of the contact's most recent inbound message, if any
               name: c.fullName || c.contactName || '',
               phone: c.phone || '',
               body: c.lastMessageBody || '',
@@ -165,15 +169,74 @@ function findBlasts(items, gapMs, minSize) {
   return blasts;
 }
 
-function selectContacts(scan, from, to, contains) {
+// ---------- Reply check ----------
+// The search above only knows about the LAST message. To be sure a contact
+// never answered, read their message history and look for anything inbound
+// (text, call, email, chat). System activity entries are ignored.
+
+const verifyJobs = new Map(); // jobId -> { status, done, failed, total, error, createdAt }
+
+async function findLastInbound(token, conversationId) {
+  let lastMessageId = null;
+  for (let page = 0; page < 40; page++) {
+    const qs = new URLSearchParams({ limit: '100' });
+    if (lastMessageId) qs.set('lastMessageId', lastMessageId);
+    const data = await ghl(token, 'GET', `/conversations/${encodeURIComponent(conversationId)}/messages?${qs}`, CONVERSATIONS_VERSION);
+    const box = data.messages || {};
+    const list = box.messages || [];
+    for (const m of list) { // newest first
+      const type = String(m.messageType || '');
+      if (m.direction === 'inbound' && !type.startsWith('TYPE_ACTIVITY') && type !== 'TYPE_INTERNAL_COMMENTS') {
+        return Date.parse(m.dateAdded) || Date.now();
+      }
+    }
+    if (!box.nextPage || !list.length || !box.lastMessageId || box.lastMessageId === lastMessageId) break;
+    lastMessageId = box.lastMessageId;
+  }
+  return null;
+}
+
+async function runVerifyJob(job, token, items) {
+  let index = 0;
+  const worker = async () => {
+    for (;;) {
+      const i = index++;
+      if (i >= items.length) return;
+      const it = items[i];
+      try {
+        if (!it.checked) {
+          it.lastInbound = await findLastInbound(token, it.conversationId);
+          it.checked = true;
+        }
+        job.done++;
+      } catch (err) {
+        job.failed++;
+        job.lastError = err.message;
+        if (err.status === 401 || err.status === 403) { job.fatal = err.message; index = items.length; return; }
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: 6 }, worker));
+  job.status = job.fatal ? 'error' : 'done';
+  if (job.fatal) job.error = job.fatal;
+}
+
+// mode 'ever'  -> leave out anyone who has EVER sent anything inbound (default)
+// mode 'since' -> leave out only people who replied after this blast started
+function selectContacts(scan, from, to, contains, mode) {
   const needle = (contains || '').trim().toLowerCase();
   const byContact = new Map();
+  let inRange = 0, replied = 0, unchecked = 0;
   for (const it of scan.items) {
     if (it.ts < from || it.ts > to) continue;
     if (needle && !it.body.toLowerCase().includes(needle)) continue;
+    inRange++;
+    if (!it.checked) { unchecked++; continue; }
+    const hasReplied = mode === 'since' ? (it.lastInbound !== null && it.lastInbound >= from) : it.lastInbound !== null;
+    if (hasReplied) { replied++; continue; }
     if (!byContact.has(it.contactId)) byContact.set(it.contactId, it);
   }
-  return [...byContact.values()];
+  return { contacts: [...byContact.values()], inRange, replied, unchecked };
 }
 
 // ---------- Tagging ----------
@@ -224,7 +287,7 @@ function getScan(req, res) {
 }
 
 function range(q) {
-  return { from: Number(q.from), to: Number(q.to), contains: String(q.contains || '') };
+  return { from: Number(q.from), to: Number(q.to), contains: String(q.contains || ''), mode: q.mode === 'since' ? 'since' : 'ever' };
 }
 
 app.post('/api/scan', (req, res) => {
@@ -256,19 +319,20 @@ app.get('/api/scan/:id/blasts', (req, res) => {
 app.get('/api/scan/:id/contacts', (req, res) => {
   const scan = getScan(req, res);
   if (!scan) return;
-  const { from, to, contains } = range(req.query);
-  const contacts = selectContacts(scan, from, to, contains);
-  res.json({ count: contacts.length, preview: contacts.slice(0, 25) });
+  const { from, to, contains, mode } = range(req.query);
+  const r = selectContacts(scan, from, to, contains, mode);
+  const slim = (c) => ({ name: c.name, phone: c.phone, ts: c.ts, body: c.body });
+  res.json({ count: r.contacts.length, inRange: r.inRange, replied: r.replied, unchecked: r.unchecked, preview: r.contacts.slice(0, 25).map(slim) });
 });
 
 app.get('/api/scan/:id/contacts.csv', (req, res) => {
   const scan = getScan(req, res);
   if (!scan) return;
-  const { from, to, contains } = range(req.query);
+  const { from, to, contains, mode } = range(req.query);
   const q = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
   const esc = (v) => q(String(v ?? '').replace(/^([=+\-@])/, "'$1")); // stop spreadsheet formulas in free text
   const rows = [['Contact ID', 'Name', 'Phone', 'Blast text sent at (UTC)', 'Last text'].map(esc).join(',')];
-  for (const c of selectContacts(scan, from, to, contains)) {
+  for (const c of selectContacts(scan, from, to, contains, mode).contacts) {
     rows.push([q(c.contactId), esc(c.name), q(c.phone), q(new Date(c.ts).toISOString()), esc(c.body)].join(','));
   }
   res.setHeader('Content-Type', 'text/csv; charset=utf-8');
@@ -283,13 +347,34 @@ app.post('/api/scan/:id/tag', (req, res) => {
   if (!c) return;
   const tag = String(req.body.tag || '').trim().toLowerCase();
   if (!tag) return res.status(400).json({ error: 'Enter a tag name.' });
-  const contacts = selectContacts(scan, Number(req.body.from), Number(req.body.to), req.body.contains);
+  const { from, to, contains, mode } = range(req.body);
+  const { contacts } = selectContacts(scan, from, to, contains, mode);
   if (!contacts.length) return res.status(400).json({ error: 'No contacts match that selection.' });
   const id = crypto.randomUUID();
   const job = { status: 'running', done: 0, failed: 0, total: contacts.length, tag, createdAt: Date.now() };
   tagJobs.set(id, job);
   runTagJob(job, c.token, contacts, tag);
   res.json({ jobId: id, total: contacts.length });
+});
+
+app.post('/api/scan/:id/verify', (req, res) => {
+  const scan = getScan(req, res);
+  if (!scan) return;
+  const c = creds(req, res);
+  if (!c) return;
+  const from = Number(req.body.from), to = Number(req.body.to);
+  const items = scan.items.filter((it) => it.ts >= from && it.ts <= to && !it.checked);
+  const id = crypto.randomUUID();
+  const job = { status: items.length ? 'running' : 'done', done: 0, failed: 0, total: items.length, createdAt: Date.now() };
+  verifyJobs.set(id, job);
+  if (items.length) runVerifyJob(job, c.token, items);
+  res.json({ jobId: id, total: items.length });
+});
+
+app.get('/api/verify/:id', (req, res) => {
+  const job = verifyJobs.get(req.params.id);
+  if (!job) return res.status(404).json({ error: 'Check not found.' });
+  res.json({ status: job.status, done: job.done, failed: job.failed, total: job.total, error: job.error || null, lastError: job.lastError || null });
 });
 
 app.get('/api/tag/:id', (req, res) => {
@@ -302,6 +387,7 @@ setInterval(() => {
   const now = Date.now();
   for (const [id, s] of scans) if (now - s.createdAt > KEEP_MS) scans.delete(id);
   for (const [id, j] of tagJobs) if (now - j.createdAt > KEEP_MS) tagJobs.delete(id);
+  for (const [id, j] of verifyJobs) if (now - j.createdAt > KEEP_MS) verifyJobs.delete(id);
 }, 10 * 60 * 1000).unref();
 
 app.listen(PORT, () => console.log(`blast-no-reply-finder listening on ${PORT}`));
