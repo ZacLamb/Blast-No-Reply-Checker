@@ -392,6 +392,7 @@ async function tick() {
   ticking = true;
   try {
     for (const sched of await store.all()) {
+      if (String(sched.locationId || '').startsWith('campaign:')) continue;
       if (!isDue(sched)) continue;
       sched.lastRunDate = localClock(sched.timezone).date;
       await store.put(sched);
@@ -413,6 +414,9 @@ app.use(express.json({ limit: '100kb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
 app.get('/health', (req, res) => res.json({ ok: true, service: 'blast-no-reply-finder' }));
+
+const campaign = require('./campaign')({ ghl, store, findLastInbound, localClock, runScan, findBlasts, CONVERSATIONS_VERSION, CONTACTS_VERSION });
+app.use('/api/campaign', campaign.router);
 
 function creds(req, res) {
   const token = String(req.body?.token || '').trim();
@@ -622,5 +626,8 @@ store.init().then(() => {
   console.log(`schedule storage: ${store.kind}`);
   setInterval(tick, TICK_MS).unref();
   setTimeout(tick, 5000).unref();
+  const campaignEvery = Number(process.env.CAMPAIGN_TICK_MS || 2 * 60000);
+  setInterval(campaign.tick, campaignEvery).unref();
+  setTimeout(campaign.tick, 8000).unref();
   app.listen(PORT, () => console.log(`blast-no-reply-finder listening on ${PORT}`));
 }).catch((err) => { console.error('storage init failed:', err.message); process.exit(1); });

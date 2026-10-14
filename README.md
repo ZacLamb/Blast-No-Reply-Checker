@@ -1,7 +1,13 @@
-# Blast No-Reply Finder
+# Blast Tools
 
-One page, one job: find the most recent SMS blast in a GHL sub-account, list
-everyone who has not replied to it, and tag them so you can resend from GHL.
+One page, two tools for a GHL sub-account. Connect with the sub-account's
+Location ID and a Private Integration token; nothing is configured in GHL.
+
+**No-reply finder:** find the most recent SMS blast, list everyone who has not
+replied to it, and tag them so you can resend from GHL.
+
+**Offer campaign:** the real-offer / estimate text sequence with daily
+follow-ups and reply handling, run by this app instead of GHL workflows.
 
 ## How it works
 
@@ -61,6 +67,48 @@ With neither, schedules still work but are lost on every redeploy; the page
 says so.
 
 Manual use (steps 1-3) needs none of this.
+
+## Offer campaign
+
+Everything is pulled from the sub-account on the "Offer campaign" tab:
+
+- SMS snippets and texts from blasts sent in the last 30 days, to pick the
+  three messages from (TEMPLATE 1, THIRD FOLLOW UP, TEMPLATE 2). Merge fields
+  such as `{{contact.first_name}}` and `{{contact.offer_k}}` are filled per
+  contact by the app, since the API sends text as-is.
+- Custom fields (checks `offer_k`, `payback_amount`, `weekly_payment` exist),
+  tags, pipelines and stages, users, and the sub-account timezone.
+
+What runs, every 2 minutes while the campaign is on:
+
+1. Contacts newly tagged `sms-real-offer` get TEMPLATE 1; `sms-estimate-offer`
+   get THIRD FOLLOW UP. Both then get `sms-followup`. Contacts already on DND or
+   tagged `opted-out` are skipped.
+2. Replies are picked up (one conversation search, not one call per contact).
+   "N" (or any word in the opt-out list): DND for SMS, tag `opted-out`, remove
+   `sms-followup`. Anything else: tag `sms-replied`, remove `sms-followup`,
+   move the opportunity in the chosen pipeline to the chosen stage, create a
+   task for the chosen user; real-offer replies are also assigned to that user
+   with a "call within N minutes" task.
+3. Anyone still waiting gets TEMPLATE 2 once per day, inside the sending
+   window in the contact's timezone (sub-account timezone when the contact has
+   none), after a last check that nothing came in. After the cap, they get
+   `sms-exhausted` and stop.
+
+"Test with your number" previews or sends any of the three messages to one
+existing contact, rendered with that contact's fields.
+
+Token scopes for this tab: `conversations.readonly`,
+`conversations/message.readonly`, `conversations/message.write`,
+`contacts.readonly`, `contacts.write`, `locations.readonly`,
+`locations/templates.readonly`, `locations/customFields.readonly`,
+`locations/tags.readonly`, `opportunities.readonly`, `opportunities.write`,
+`users.readonly`.
+
+Campaign state (token included) is stored the same way as schedules, so use
+Postgres on Railway. GHL has no API for in-app notifications; the task assigned
+to the user is the notification. Confirm the sending numbers are A2P 10DLC
+registered before turning it on.
 
 ## Good to know
 

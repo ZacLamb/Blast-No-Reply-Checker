@@ -58,12 +58,18 @@
   td.msg { min-width: 240px; white-space: normal; overflow-wrap: anywhere; }
   progress { width: 100%; height: 10px; margin-top: 12px; accent-color: var(--accent); }
   [hidden] { display: none !important; }
+  .tabs { display: flex; gap: 6px; margin: 0 0 20px; border-bottom: 1px solid var(--line); }
+  .tabs button { background: transparent; color: var(--muted); border-radius: 8px 8px 0 0; padding: 10px 14px; border: 1px solid transparent; border-bottom: 0; }
+  .tabs button.on { color: var(--ink); background: var(--card); border-color: var(--line); margin-bottom: -1px; }
+  textarea { width: 100%; min-height: 90px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--ink); font: inherit; resize: vertical; }
+  .stat { display: inline-block; margin: 0 14px 6px 0; } .stat b { font-size: 20px; margin-right: 4px; }
+  .pill { display: inline-block; font-size: 11px; font-weight: 700; padding: 2px 7px; border-radius: 99px; background: var(--soft); color: var(--accent); }
 </style>
 </head>
 <body>
 <main>
-  <h1>Blast No-Reply Finder</h1>
-  <p class="lede">Finds your most recent SMS blast, checks each contact's message history, and tags everyone who hasn't replied so you can resend from GHL.</p>
+  <h1>Blast Tools</h1>
+  <p class="lede">Connect a sub-account once. Then find the non-responders to your last blast, or run the offer text campaign from here instead of workflows.</p>
 
   <section>
     <h2><span class="n">1</span> Connect the sub-account</h2>
@@ -99,6 +105,12 @@
     <div id="scanError" class="error" hidden></div>
   </section>
 
+  <div class="tabs">
+    <button id="tabFinder" class="on">No-reply finder</button>
+    <button id="tabCampaign">Offer campaign</button>
+  </div>
+
+  <div id="finderTab">
   <section id="blastSection" hidden>
     <h2><span class="n">2</span> Pick the blast</h2>
     <div id="blastList"></div>
@@ -223,6 +235,103 @@
       </table></div>
     </details>
   </section>
+  </div>
+
+  <div id="campaignTab" hidden>
+  <section>
+    <h2><span class="n">A</span> Pull what's in the sub-account</h2>
+    <p class="status" style="margin:0 0 14px">Reads the SMS snippets, texts from recent blasts, custom fields, tags, pipelines and users. Nothing is sent.</p>
+    <div class="actions"><button id="cpPull">Pull from GHL</button><span id="cpPullStatus" class="status"></span></div>
+    <div id="cpPullInfo" class="status" style="margin-top:12px"></div>
+    <div id="cpPullError" class="error" hidden></div>
+  </section>
+
+  <section id="cpSetup" hidden>
+    <h2><span class="n">B</span> Messages</h2>
+    <p class="status" style="margin:0 0 14px">Pick a snippet or a recent blast text for each, or write your own. Merge fields like <code>{{contact.first_name}}</code> and <code>{{contact.offer_k}}</code> are filled per contact.</p>
+    <div id="cpTemplates"></div>
+
+    <h2 style="margin-top:22px"><span class="n">C</span> Tags</h2>
+    <div class="row">
+      <div><label for="tagReal">Real offer: send TEMPLATE 1 to contacts tagged</label><input id="tagReal" type="text" list="tagList" value="sms-real-offer"></div>
+      <div><label for="tagEst">Estimate: send THIRD FOLLOW UP to contacts tagged</label><input id="tagEst" type="text" list="tagList" value="sms-estimate-offer"></div>
+    </div>
+    <div class="row">
+      <div><label for="tagFollow">Added after the first text</label><input id="tagFollow" type="text" list="tagList" value="sms-followup"></div>
+      <div><label for="tagReplied">Added when they reply</label><input id="tagReplied" type="text" list="tagList" value="sms-replied"></div>
+    </div>
+    <div class="row">
+      <div><label for="tagOpt">Added when they opt out</label><input id="tagOpt" type="text" list="tagList" value="opted-out"></div>
+      <div><label for="optWords">Replies that count as opting out <span class="hint">(comma separated)</span></label><input id="optWords" type="text" value="n"></div>
+    </div>
+    <datalist id="tagList"></datalist>
+
+    <h2 style="margin-top:22px"><span class="n">D</span> Follow-ups and sending window</h2>
+    <div class="row">
+      <div><label for="cpCap">Daily follow-ups per contact (after the first text)</label><input id="cpCap" type="number" min="0" max="60" value="5"></div>
+      <div><label for="cpDays">Days</label><select id="cpDays"><option value="weekdays">Mon–Fri</option><option value="daily">Every day</option></select></div>
+    </div>
+    <div class="row">
+      <div><label for="cpStart">Send from <span class="hint">(contact's timezone)</span></label><input id="cpStart" type="time" value="09:00"></div>
+      <div><label for="cpEnd">Until</label><input id="cpEnd" type="time" value="19:00"></div>
+    </div>
+
+    <h2 style="margin-top:22px"><span class="n">E</span> When someone replies</h2>
+    <div class="row">
+      <div><label for="cpPipeline">Pipeline</label><select id="cpPipeline"></select></div>
+      <div><label for="cpStage">Move opportunity to</label><select id="cpStage"></select></div>
+    </div>
+    <div class="row">
+      <div><label for="cpOwner">Notify (task) and assign real-offer replies to</label><select id="cpOwner"></select></div>
+      <div><label for="cpTaskMin">Call-back task due in (minutes)</label><input id="cpTaskMin" type="number" min="1" value="5"></div>
+    </div>
+
+    <div class="actions" style="margin-top:6px">
+      <button id="cpSave">Save</button>
+      <span id="cpSaveStatus" class="status"></span>
+    </div>
+    <div id="cpSaveError" class="error" hidden></div>
+  </section>
+
+  <section id="cpTest" hidden>
+    <h2><span class="n">F</span> Test with your number</h2>
+    <div class="row">
+      <div><label for="cpTestContact">Your phone number or contact ID <span class="hint">(must already be a contact)</span></label><input id="cpTestContact" type="text" autocomplete="off"></div>
+      <div><label for="cpTestWhich">Message</label><select id="cpTestWhich"><option value="real">TEMPLATE 1 (real offer)</option><option value="estimate">THIRD FOLLOW UP (estimate)</option><option value="followup">TEMPLATE 2 (daily follow-up)</option></select></div>
+    </div>
+    <div class="actions">
+      <button id="cpPreview" class="ghost">Preview</button>
+      <button id="cpSendTest">Send test</button>
+      <span id="cpTestStatus" class="status"></span>
+    </div>
+    <pre id="cpTestOut" class="status" style="white-space:pre-wrap;margin:12px 0 0"></pre>
+    <div id="cpTestError" class="error" hidden></div>
+  </section>
+
+  <section id="cpRun" hidden>
+    <h2><span class="n">G</span> Run</h2>
+    <p class="status" style="margin:0 0 14px">While on, every 2 minutes the app texts newly tagged contacts, checks for replies, and sends the daily follow-up to anyone still waiting. Before going live, confirm the sending numbers are A2P 10DLC registered.</p>
+    <label class="check" style="font-size:15px;color:var(--ink)"><input id="cpOn" type="checkbox"> Campaign is on</label>
+    <div class="actions">
+      <button id="cpToggle">Save on/off</button>
+      <button id="cpRunNow" class="ghost">Run a pass now</button>
+      <span id="cpRunStatus" class="status"></span>
+    </div>
+    <div id="cpStats" style="margin-top:14px"></div>
+    <div id="cpRunError" class="error" hidden></div>
+    <details open style="margin-top:8px">
+      <summary>Contacts</summary>
+      <div class="tablewrap"><table>
+        <thead><tr><th>Name</th><th>Phone</th><th>Type</th><th>Status</th><th>Texts</th><th>Reply / note</th></tr></thead>
+        <tbody id="cpContacts"></tbody>
+      </table></div>
+    </details>
+    <details style="margin-top:8px">
+      <summary>Activity log</summary>
+      <div class="tablewrap"><table><thead><tr><th>When</th><th>Event</th></tr></thead><tbody id="cpLog"></tbody></table></div>
+    </details>
+  </section>
+  </div>
 </main>
 
 <script>
@@ -511,6 +620,187 @@ $('schedDelete').onclick = async () => {
 };
 
 if ($('loc').value && $('tok').value) loadSchedule();
+
+// ---------- Tabs ----------
+function showTab(name) {
+  $('finderTab').hidden = name !== 'finder'; $('campaignTab').hidden = name !== 'campaign';
+  $('tabFinder').classList.toggle('on', name === 'finder'); $('tabCampaign').classList.toggle('on', name === 'campaign');
+  try { localStorage.setItem('bnrf-tab', name); } catch (e) {}
+  if (name === 'campaign' && !cp.loaded) cpLoad();
+}
+$('tabFinder').onclick = () => showTab('finder');
+$('tabCampaign').onclick = () => showTab('campaign');
+
+// ---------- Offer campaign ----------
+const cp = { loaded: false, setup: null, campaign: null, poll: null };
+const K = ['real', 'estimate', 'followup'];
+const LABELS = { real: 'TEMPLATE 1 — real offer (uses offer_k, payback_amount, weekly_payment)', estimate: 'THIRD FOLLOW UP — estimate / non-offer', followup: 'TEMPLATE 2 — daily follow-up for both' };
+
+function cpOptions() {
+  const s = cp.setup || {};
+  const opts = [];
+  (s.snippets || []).forEach((t) => opts.push({ v: 'snippet:' + t.id, label: 'Snippet: ' + t.name, body: t.body, source: 'snippet', id: t.id, name: t.name }));
+  (s.blastTexts || []).forEach((t) => opts.push({ v: 'blast:' + t.id, label: 'Sent ' + fmtWhen(t.sentAt) + ' to ' + t.count + ': ' + t.body.slice(0, 60), body: t.body, source: 'blast', id: t.id, name: 'Blast ' + fmtWhen(t.sentAt) }));
+  return opts;
+}
+
+function renderTemplates() {
+  const wrap = $('cpTemplates'); wrap.textContent = '';
+  const opts = cpOptions();
+  K.forEach((k) => {
+    const cur = cp.campaign?.templates?.[k];
+    const box = document.createElement('div'); box.style.marginBottom = '16px';
+    const lab = document.createElement('label'); lab.textContent = LABELS[k]; box.appendChild(lab);
+    const sel = document.createElement('select'); sel.id = 'tpl-' + k; sel.style.marginBottom = '8px';
+    const o0 = document.createElement('option'); o0.value = ''; o0.textContent = 'Write my own below…'; sel.appendChild(o0);
+    opts.forEach((o) => { const op = document.createElement('option'); op.value = o.v; op.textContent = o.label; sel.appendChild(op); });
+    const ta = document.createElement('textarea'); ta.id = 'tplbody-' + k; ta.placeholder = 'Message text';
+    if (cur) { ta.value = cur.body; const match = opts.find((o) => o.source === cur.source && o.id === cur.id); if (match) sel.value = match.v; }
+    else {
+      // best guess by snippet name
+      const want = { real: /template\s*1/i, estimate: /third\s*follow/i, followup: /template\s*2/i }[k];
+      const guess = opts.find((o) => o.source === 'snippet' && want.test(o.name));
+      if (guess) { sel.value = guess.v; ta.value = guess.body; }
+    }
+    sel.onchange = () => { const o = opts.find((x) => x.v === sel.value); if (o) ta.value = o.body; };
+    box.append(sel, ta); wrap.appendChild(box);
+  });
+}
+
+function fill(sel, items, cur, blankLabel) {
+  sel.textContent = '';
+  const o0 = document.createElement('option'); o0.value = ''; o0.textContent = blankLabel; sel.appendChild(o0);
+  items.forEach((it) => { const o = document.createElement('option'); o.value = it.id; o.textContent = it.name; sel.appendChild(o); });
+  sel.value = cur || '';
+}
+function fillStages() {
+  const p = (cp.setup?.pipelines || []).find((x) => x.id === $('cpPipeline').value);
+  const stages = p ? p.stages : [];
+  const cur = cp.campaign?.stageId;
+  const guess = stages.find((s) => /contacted/i.test(s.name));
+  fill($('cpStage'), stages, cur || (guess && guess.id) || '', 'Don’t move');
+}
+
+function renderCampaignForm() {
+  const c = cp.campaign, s = cp.setup || {};
+  $('cpSetup').hidden = false; $('cpTest').hidden = false; $('cpRun').hidden = false;
+  renderTemplates();
+  const dl = $('tagList'); dl.textContent = ''; (s.tags || []).forEach((t) => { const o = document.createElement('option'); o.value = t; dl.appendChild(o); });
+  if (c) {
+    $('tagReal').value = c.tags.real; $('tagEst').value = c.tags.estimate; $('tagFollow').value = c.tags.followup; $('tagReplied').value = c.tags.replied; $('tagOpt').value = c.tags.optedOut;
+    $('optWords').value = (c.optOutWords || []).join(', ');
+    $('cpCap').value = c.cap; $('cpDays').value = c.window.days; $('cpStart').value = c.window.start; $('cpEnd').value = c.window.end; $('cpTaskMin').value = c.taskMinutes;
+  }
+  const pGuess = (s.pipelines || []).find((p) => /leads/i.test(p.name));
+  fill($('cpPipeline'), s.pipelines || [], c?.pipelineId || (pGuess && pGuess.id) || '', 'Don’t move opportunities');
+  fillStages();
+  $('cpPipeline').onchange = fillStages;
+  fill($('cpOwner'), (s.users || []), c?.ownerId || '', 'Nobody');
+  renderRun();
+}
+
+function renderRun() {
+  const c = cp.campaign;
+  if (!c) return;
+  $('cpOn').checked = !!c.enabled;
+  const st = c.stats || {};
+  $('cpStats').innerHTML = '';
+  [['active', 'waiting'], ['replied', 'replied'], ['opted-out', 'opted out'], ['exhausted', 'done, no reply'], ['error', 'errors']].forEach(([k, label]) => {
+    const sp = document.createElement('span'); sp.className = 'stat'; const b = document.createElement('b'); b.textContent = (st[k] || 0).toLocaleString(); sp.append(b, document.createTextNode(label)); $('cpStats').appendChild(sp);
+  });
+  let line = c.enabled ? 'On.' : 'Off.';
+  if (c.running) line += ' Running a pass now…';
+  else if (c.lastRunAt) line += ' Last pass ' + fmtWhen(c.lastRunAt) + (c.lastRunError ? ' (failed: ' + c.lastRunError + ')' : '.');
+  $('cpRunStatus').textContent = line;
+  const tb = $('cpContacts'); tb.textContent = '';
+  (c.recent || []).forEach((r) => {
+    const tr = document.createElement('tr');
+    [r.name || '—', r.phone || '—', r.kind === 'real' ? 'Real offer' : 'Estimate', r.status, String(r.sends || 0), r.reply || r.error || ''].forEach((v, i) => { const td = document.createElement('td'); td.textContent = v; if (i === 5) td.className = 'msg'; tr.appendChild(td); });
+    tb.appendChild(tr);
+  });
+  const lg = $('cpLog'); lg.textContent = '';
+  (c.log || []).forEach((e) => { const tr = document.createElement('tr'); const a = document.createElement('td'); a.textContent = fmtWhen(e.at); const b = document.createElement('td'); b.className = 'msg'; b.textContent = e.text; tr.append(a, b); lg.appendChild(tr); });
+}
+
+async function cpLoad() {
+  const c = creds(); if (!c.token || !c.locationId) return;
+  try {
+    const r = await post('/api/campaign/get', c);
+    cp.loaded = true; cp.campaign = r.campaign; cp.setup = r.setup;
+    if (cp.setup) { $('cpPullInfo').textContent = pullSummary(cp.setup, []); renderCampaignForm(); }
+  } catch (e) { show($('cpPullError'), e.message); }
+}
+
+function pullSummary(s, missing) {
+  const parts = [s.snippets.length + ' SMS snippets', s.blastTexts.length + ' recent blast texts', s.customFields.length + ' custom fields', s.tags.length + ' tags', s.pipelines.length + ' pipelines', s.users.length + ' users', 'timezone ' + (s.timezone || 'unknown')];
+  let t = 'Pulled ' + (s.pulledAt ? fmtWhen(s.pulledAt) : '') + ': ' + parts.join(', ') + '.';
+  if (missing && missing.length) t += ' Missing custom fields: ' + missing.join(', ') + ' — TEMPLATE 1 will send blanks until these exist and are filled.';
+  if (s.warnings && s.warnings.length) t += ' Could not read: ' + s.warnings.join('; ');
+  return t;
+}
+
+$('cpPull').onclick = async () => {
+  const c = creds(); show($('cpPullError'), '');
+  if (!c.token || !c.locationId) return show($('cpPullError'), 'Enter the Location ID and the token in step 1 first.');
+  remember(); $('cpPull').disabled = true; $('cpPullStatus').textContent = 'Reading the sub-account (this scans recent conversations, give it a minute)…';
+  try {
+    const r = await post('/api/campaign/setup', c);
+    cp.loaded = true; cp.setup = r.setup; cp.campaign = r.campaign;
+    $('cpPullInfo').textContent = pullSummary(r.setup, r.missingFields);
+    renderCampaignForm();
+    $('cpPullStatus').textContent = 'Done.';
+  } catch (e) { $('cpPullStatus').textContent = ''; show($('cpPullError'), e.message); }
+  finally { $('cpPull').disabled = false; }
+};
+
+function cpBody() {
+  const opts = cpOptions();
+  const templates = {};
+  K.forEach((k) => { const v = $('tpl-' + k).value; const o = opts.find((x) => x.v === v); const body = $('tplbody-' + k).value; templates[k] = body.trim() ? { source: o && o.body === body ? o.source : 'text', id: o && o.body === body ? o.id : null, name: o && o.body === body ? o.name : null, body } : null; });
+  return { ...creds(), templates,
+    tags: { real: $('tagReal').value, estimate: $('tagEst').value, followup: $('tagFollow').value, replied: $('tagReplied').value, optedOut: $('tagOpt').value },
+    optOutWords: $('optWords').value.split(',').map((w) => w.trim()).filter(Boolean),
+    cap: Number($('cpCap').value), window: { days: $('cpDays').value, start: $('cpStart').value, end: $('cpEnd').value },
+    pipelineId: $('cpPipeline').value, stageId: $('cpStage').value, ownerId: $('cpOwner').value, taskMinutes: Number($('cpTaskMin').value) };
+}
+
+$('cpSave').onclick = async () => {
+  show($('cpSaveError'), ''); $('cpSave').disabled = true; $('cpSaveStatus').textContent = 'Saving…';
+  try { const r = await post('/api/campaign/save', cpBody()); cp.campaign = r.campaign; renderRun(); $('cpSaveStatus').textContent = 'Saved.'; }
+  catch (e) { $('cpSaveStatus').textContent = ''; show($('cpSaveError'), e.message); }
+  finally { $('cpSave').disabled = false; }
+};
+
+async function cpTest(preview) {
+  show($('cpTestError'), ''); $('cpTestOut').textContent = ''; $('cpTestStatus').textContent = preview ? 'Rendering…' : 'Sending…';
+  try {
+    const r = await post('/api/campaign/test', { ...creds(), contact: $('cpTestContact').value, which: $('cpTestWhich').value, body: $('tplbody-' + $('cpTestWhich').value).value, preview });
+    $('cpTestStatus').textContent = preview ? 'Preview for ' + (r.contact.name || r.contact.phone) + ':' : 'Sent to ' + (r.contact.name || r.contact.phone) + ':';
+    $('cpTestOut').textContent = r.preview || r.message;
+  } catch (e) { $('cpTestStatus').textContent = ''; show($('cpTestError'), e.message); }
+}
+$('cpPreview').onclick = () => cpTest(true);
+$('cpSendTest').onclick = () => cpTest(false);
+
+$('cpToggle').onclick = async () => {
+  show($('cpRunError'), '');
+  try { const r = await post('/api/campaign/save', { ...cpBody(), enabled: $('cpOn').checked }); cp.campaign = r.campaign; renderRun(); }
+  catch (e) { $('cpOn').checked = !!cp.campaign?.enabled; show($('cpRunError'), e.message); }
+};
+
+$('cpRunNow').onclick = async () => {
+  show($('cpRunError'), ''); $('cpRunNow').disabled = true;
+  try {
+    await post('/api/campaign/run', creds());
+    clearInterval(cp.poll);
+    cp.poll = setInterval(async () => {
+      try { const r = await post('/api/campaign/get', creds()); cp.campaign = r.campaign; renderRun(); if (!r.campaign.running) { clearInterval(cp.poll); $('cpRunNow').disabled = false; } }
+      catch (e) { clearInterval(cp.poll); $('cpRunNow').disabled = false; show($('cpRunError'), e.message); }
+    }, 2500);
+  } catch (e) { $('cpRunNow').disabled = false; show($('cpRunError'), e.message); }
+};
+
+try { if (localStorage.getItem('bnrf-tab') === 'campaign') showTab('campaign'); } catch (e) {}
 </script>
 </body>
 </html>
