@@ -25,7 +25,7 @@
   h2 .n { width: 24px; height: 24px; border-radius: 50%; background: var(--soft); color: var(--accent); display: grid; place-items: center; font-size: 13px; }
   label { display: block; font-size: 13px; font-weight: 600; margin: 0 0 6px; }
   .hint { font-weight: 400; color: var(--muted); }
-  input[type=text], input[type=password], input[type=number], select {
+  input[type=text], input[type=password], input[type=number], input[type=time], select {
     width: 100%; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px;
     background: var(--bg); color: var(--ink); font: inherit;
   }
@@ -156,6 +156,73 @@
     <div id="tagDone" class="done" hidden></div>
     <div id="tagError" class="error" hidden></div>
   </section>
+
+  <section id="schedSection">
+    <h2><span class="n">4</span> Run automatically <span class="hint" style="font-weight:400">(optional)</span></h2>
+    <p class="status" style="margin:0 0 14px">Every day at the time below, the latest blast is found, replies are checked, and the non-responders are tagged. Each blast is only tagged once.</p>
+    <label class="check" style="font-size:15px;color:var(--ink)"><input id="schedOn" type="checkbox"> Turn on automatic runs</label>
+    <div class="row">
+      <div>
+        <label for="schedTime">Run at</label>
+        <input id="schedTime" type="time" value="18:00">
+      </div>
+      <div>
+        <label for="schedTz">Timezone</label>
+        <select id="schedTz"></select>
+      </div>
+    </div>
+    <div class="row">
+      <div>
+        <label for="schedDays">Days</label>
+        <select id="schedDays">
+          <option value="daily">Every day</option>
+          <option value="weekdays">Weekdays only</option>
+        </select>
+      </div>
+      <div>
+        <label for="schedMode">Leave out</label>
+        <select id="schedMode">
+          <option value="ever">Anyone who has ever replied</option>
+          <option value="since">Only people who replied since the blast</option>
+        </select>
+      </div>
+    </div>
+    <details style="margin:0 0 14px">
+      <summary>Blast detection settings</summary>
+      <div class="row" style="margin-top:12px">
+        <div>
+          <label for="schedLookback">Look back (days)</label>
+          <input id="schedLookback" type="number" min="1" max="90" value="7">
+        </div>
+        <div></div>
+      </div>
+      <div class="row">
+        <div>
+          <label for="schedGap">Max gap between texts (minutes)</label>
+          <input id="schedGap" type="number" min="1" max="240" value="10">
+        </div>
+        <div>
+          <label for="schedMin">Smallest blast to count (contacts)</label>
+          <input id="schedMin" type="number" min="2" value="20">
+        </div>
+      </div>
+    </details>
+    <div class="actions">
+      <button id="schedSave">Save</button>
+      <button id="schedRun" class="ghost">Run now</button>
+      <button id="schedDelete" class="ghost">Remove</button>
+      <span id="schedStatus" class="status"></span>
+    </div>
+    <div id="schedInfo" class="status" style="margin-top:12px"></div>
+    <div id="schedError" class="error" hidden></div>
+    <details id="schedHistoryWrap" hidden>
+      <summary>Recent runs</summary>
+      <div class="tablewrap"><table>
+        <thead><tr><th>When</th><th>Result</th></tr></thead>
+        <tbody id="schedHistory"></tbody>
+      </table></div>
+    </details>
+  </section>
 </main>
 
 <script>
@@ -213,6 +280,7 @@ $('scanBtn').onclick = async () => {
       if (s.status === 'done') break;
     }
     await loadBlasts();
+    loadSchedule();
   } catch (e) {
     $('scanStatus').textContent = '';
     show($('scanError'), e.message);
@@ -345,6 +413,104 @@ $('tagBtn').onclick = async () => {
     tagging = false; $('tagBtn').disabled = checking;
   }
 };
+
+// ---------- Schedule ----------
+(function () {
+  const tzSel = $('schedTz');
+  let zones = [];
+  try { zones = Intl.supportedValuesOf('timeZone'); } catch (e) {}
+  const mine = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const common = ['America/New_York', 'America/Chicago', 'America/Denver', 'America/Phoenix', 'America/Los_Angeles', 'America/Anchorage', 'Pacific/Honolulu', 'America/Toronto', 'America/Sao_Paulo', 'America/Cuiaba', 'Europe/London', 'UTC'];
+  const list = [...new Set([mine, ...common, ...zones].filter(Boolean))];
+  list.forEach((z) => { const o = document.createElement('option'); o.value = z; o.textContent = z.replace(/_/g, ' '); tzSel.appendChild(o); });
+  tzSel.value = mine || 'America/New_York';
+})();
+
+const fmtWhen = (ts) => new Date(ts).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+let schedPoll = null;
+
+function renderSchedule(s, storage, isRunning) {
+  show($('schedError'), '');
+  if (!s) {
+    $('schedInfo').textContent = 'Not set up for this sub-account yet.';
+    $('schedHistoryWrap').hidden = true;
+    $('schedRun').disabled = true; $('schedDelete').disabled = true;
+    return;
+  }
+  $('schedRun').disabled = !!isRunning; $('schedDelete').disabled = false;
+  $('schedOn').checked = s.enabled; $('schedTime').value = s.time; $('schedDays').value = s.days; $('schedMode').value = s.mode;
+  $('schedLookback').value = s.lookbackDays; $('schedGap').value = s.gapMin; $('schedMin').value = s.minSize;
+  if (![...$('schedTz').options].some((o) => o.value === s.timezone)) { const o = document.createElement('option'); o.value = s.timezone; o.textContent = s.timezone; $('schedTz').appendChild(o); }
+  $('schedTz').value = s.timezone;
+  let line = s.enabled ? 'On. Runs ' + (s.days === 'weekdays' ? 'weekdays' : 'every day') + ' at ' + s.time + ' (' + s.timezone.replace(/_/g, ' ') + ').' : 'Saved but turned off.';
+  if (isRunning) line += ' Running now…';
+  else if (s.lastRun) line += ' Last run ' + fmtWhen(s.lastRun.at) + ': ' + s.lastRun.message;
+  if (storage === 'file') line += ' Note: schedules are stored in a file on the server; add a Railway volume or Postgres so they survive redeploys.';
+  $('schedInfo').textContent = line;
+  const tb = $('schedHistory'); tb.textContent = '';
+  (s.history || []).forEach((r) => {
+    const tr = document.createElement('tr');
+    const a = document.createElement('td'); a.textContent = fmtWhen(r.at);
+    const b = document.createElement('td'); b.className = 'msg'; b.textContent = (r.ok ? '' : 'Error: ') + (r.message || r.outcome || '');
+    tr.append(a, b); tb.appendChild(tr);
+  });
+  $('schedHistoryWrap').hidden = !(s.history || []).length;
+}
+
+async function loadSchedule() {
+  const c = creds();
+  if (!c.token || !c.locationId) return;
+  try {
+    const r = await post('/api/schedule/get', c);
+    renderSchedule(r.schedule, r.storage, false);
+  } catch (e) { show($('schedError'), e.message); }
+}
+
+function schedBody() {
+  return { ...creds(), enabled: $('schedOn').checked, time: $('schedTime').value, timezone: $('schedTz').value, days: $('schedDays').value, mode: $('schedMode').value,
+    lookbackDays: Number($('schedLookback').value), gapMin: Number($('schedGap').value), minSize: Number($('schedMin').value) };
+}
+
+$('schedSave').onclick = async () => {
+  const c = creds();
+  show($('schedError'), '');
+  if (!c.token || !c.locationId) return show($('schedError'), 'Enter the Location ID and the token in step 1 first.');
+  remember();
+  $('schedSave').disabled = true; $('schedStatus').textContent = 'Saving…';
+  try {
+    const r = await post('/api/schedule/save', schedBody());
+    renderSchedule(r.schedule, r.storage, false);
+    $('schedStatus').textContent = 'Saved.';
+  } catch (e) { $('schedStatus').textContent = ''; show($('schedError'), e.message); }
+  finally { $('schedSave').disabled = false; }
+};
+
+$('schedRun').onclick = async () => {
+  show($('schedError'), '');
+  $('schedRun').disabled = true; $('schedStatus').textContent = 'Running…';
+  try {
+    await post('/api/schedule/run', creds());
+    clearInterval(schedPoll);
+    schedPoll = setInterval(async () => {
+      try {
+        const r = await post('/api/schedule/status', creds());
+        renderSchedule(r.schedule, null, r.running);
+        if (!r.running) { clearInterval(schedPoll); $('schedStatus').textContent = 'Run finished.'; }
+      } catch (e) { clearInterval(schedPoll); show($('schedError'), e.message); }
+    }, 2000);
+  } catch (e) { $('schedStatus').textContent = ''; $('schedRun').disabled = false; show($('schedError'), e.message); }
+};
+
+$('schedDelete').onclick = async () => {
+  show($('schedError'), '');
+  try {
+    await post('/api/schedule/delete', creds());
+    renderSchedule(null, null, false);
+    $('schedStatus').textContent = 'Removed.';
+  } catch (e) { show($('schedError'), e.message); }
+};
+
+if ($('loc').value && $('tok').value) loadSchedule();
 </script>
 </body>
 </html>

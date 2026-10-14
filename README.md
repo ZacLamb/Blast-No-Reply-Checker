@@ -41,6 +41,27 @@ token is typed into the page and is never stored on the server.
 4. Check the blast it found, then click **Tag contacts**.
 5. In GHL: Contacts -> filter Tag is `no-reply-...` -> select all -> send.
 
+## Run automatically (optional)
+
+Step 4 on the page turns on a daily run for that sub-account: at the time you
+pick, it finds the latest blast, checks replies and tags the non-responders.
+Each blast is tagged once, so a run that finds no new blast does nothing. "Run
+now" runs the saved settings immediately. The last ten runs are listed on the
+page.
+
+Schedules have to be stored on the server (the token included). Two options:
+
+- **Postgres (recommended on Railway):** add a Postgres database to the project
+  and set `DATABASE_URL` on the app to `${{Postgres.DATABASE_URL}}`. The table
+  is created automatically.
+- **A volume:** mount a Railway volume at `/app/data` (or set `DATA_DIR`). The
+  schedules are kept in `schedules.json` there.
+
+With neither, schedules still work but are lost on every redeploy; the page
+says so.
+
+Manual use (steps 1-3) needs none of this.
+
 ## Good to know
 
 - The history check is one GHL request per contact, at about 8 per second, so
