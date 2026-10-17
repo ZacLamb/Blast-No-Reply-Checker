@@ -1,14 +1,16 @@
 {
-  "name": "blast-no-reply-finder",
+  "name": "blast-tools",
   "version": "1.0.0",
-  "description": "Finds the most recent SMS blast in a GHL sub-account and tags everyone who has not replied to it.",
+  "description": "Find everyone who never replied to your last SMS blast and tag them for a resend — on the RGS Tools Hub.",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
   "dependencies": {
     "express": "^4.19.2",
-    "pg": "^8.23.1"
+    "pg": "^8.23.1",
+    "cookie-parser": "^1.4.6",
+    "jsonwebtoken": "^9.0.2"
   },
   "engines": {
     "node": ">=18.0.0"

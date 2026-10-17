@@ -4,12 +4,14 @@
 // reads each contact's message history to drop anyone who has replied, and
 // tags the rest.
 //
-// Manual use needs no database and no env vars: the token is typed into the
-// page and only lives in memory. The optional "run automatically" schedule has
-// to keep the token and the settings somewhere, so it uses Postgres when
-// DATABASE_URL is set, and otherwise a JSON file in DATA_DIR (./data).
+// Login, billing and GHL credentials come from the RGS Tools Hub. The user picks
+// a connected sub-account; the server asks the hub for its token per request,
+// and again at run time for schedules — so no token is ever stored here.
+// Schedules use Postgres when DATABASE_URL is set, else a JSON file in DATA_DIR.
 
 const express = require('express');
+const cookieParser = require('cookie-parser');
+const hub = require('./hub-client')({ toolSlug: 'blast-tools' });
 const crypto = require('crypto');
 const path = require('path');
 const fs = require('fs');
@@ -287,9 +289,9 @@ if (process.env.DATABASE_URL) {
       await pool.query('CREATE TABLE IF NOT EXISTS schedules (location_id TEXT PRIMARY KEY, data JSONB NOT NULL, updated_at TIMESTAMPTZ NOT NULL DEFAULT now())');
     },
     async all() { return (await pool.query('SELECT data FROM schedules')).rows.map((r) => r.data); },
-    async get(locationId) { const r = await pool.query('SELECT data FROM schedules WHERE location_id = $1', [locationId]); return r.rows[0]?.data || null; },
-    async put(sched) { await pool.query('INSERT INTO schedules (location_id, data, updated_at) VALUES ($1, $2, now()) ON CONFLICT (location_id) DO UPDATE SET data = EXCLUDED.data, updated_at = now()', [sched.locationId, sched]); },
-    async remove(locationId) { await pool.query('DELETE FROM schedules WHERE location_id = $1', [locationId]); },
+    async get(key) { const r = await pool.query('SELECT data FROM schedules WHERE location_id = $1', [key]); return r.rows[0]?.data || null; },
+    async put(sched) { await pool.query('INSERT INTO schedules (location_id, data, updated_at) VALUES ($1, $2, now()) ON CONFLICT (location_id) DO UPDATE SET data = EXCLUDED.data, updated_at = now()', [sched.key, sched]); },
+    async remove(key) { await pool.query('DELETE FROM schedules WHERE location_id = $1', [key]); },
   };
 } else {
   const file = path.join(DATA_DIR, 'schedules.json');
@@ -300,9 +302,9 @@ if (process.env.DATABASE_URL) {
     kind: 'file',
     async init() { load(); },
     async all() { return Object.values(load()); },
-    async get(locationId) { return load()[locationId] || null; },
-    async put(sched) { load()[sched.locationId] = sched; save(); },
-    async remove(locationId) { delete load()[locationId]; save(); },
+    async get(key) { return load()[key] || null; },
+    async put(sched) { load()[sched.key] = sched; save(); },
+    async remove(key) { delete load()[key]; save(); },
   };
 }
 
@@ -325,23 +327,22 @@ function tagFor(ts, tz) {
   return `no-reply-${mon}-${day}`;
 }
 
-function publicSchedule(s) {
-  if (!s) return null;
-  const { token, ...rest } = s;
-  return { ...rest, tokenHint: token ? '…' + token.slice(-4) : null };
-}
+function publicSchedule(s) { return s || null; }
 
 const running = new Set();
 
 // The whole flow, unattended: latest blast -> reply check -> tag.
 async function runSchedule(sched, { force = false } = {}) {
-  if (running.has(sched.locationId)) return { skipped: 'already running' };
-  running.add(sched.locationId);
+  if (running.has(sched.key)) return { skipped: 'already running' };
+  running.add(sched.key);
   const started = Date.now();
   const result = { at: started, ok: false };
   try {
+    let token;
+    try { token = (await hub.credentialsFor(sched.userId, sched.locationId)).pit; }
+    catch (e) { throw new Error(e.status === 404 ? 'This sub-account is no longer connected to your account.' : `Could not get credentials from the hub: ${e.message}`); }
     const scan = { status: 'running', scanned: 0, items: [] };
-    await runScan(scan, { token: sched.token, locationId: sched.locationId, days: sched.lookbackDays });
+    await runScan(scan, { token, locationId: sched.locationId, days: sched.lookbackDays });
     if (scan.status === 'error') throw new Error(scan.error);
     const blasts = findBlasts(scan.items, sched.gapMin * 60000, sched.minSize);
     if (!blasts.length) { Object.assign(result, { ok: true, outcome: 'no-blast', message: `No blast found in the last ${sched.lookbackDays} days.` }); return result; }
@@ -353,11 +354,11 @@ async function runSchedule(sched, { force = false } = {}) {
       return result;
     }
     const inBlast = scan.items.filter((it) => it.ts >= b.from && it.ts <= b.to);
-    const v = await verifyAll(sched.token, inBlast);
+    const v = await verifyAll(token, inBlast);
     const sel = selectContacts(scan, b.from, b.to, '', sched.mode);
     const tag = tagFor(b.to, sched.timezone);
     const job = { status: 'running', done: 0, failed: 0, total: sel.contacts.length, tag };
-    if (sel.contacts.length) await runTagJob(job, sched.token, sel.contacts, tag);
+    if (sel.contacts.length) await runTagJob(job, token, sel.contacts, tag);
     if (job.fatal) throw new Error(job.fatal);
     sched.lastBlastKey = key;
     Object.assign(result, {
@@ -374,7 +375,7 @@ async function runSchedule(sched, { force = false } = {}) {
     sched.lastRun = result;
     sched.history = [result, ...(sched.history || [])].slice(0, 10);
     try { await store.put(sched); } catch (e) { console.error('could not save schedule result', e.message); }
-    running.delete(sched.locationId);
+    running.delete(sched.key);
   }
 }
 
@@ -391,14 +392,20 @@ async function tick() {
   if (ticking) return;
   ticking = true;
   try {
+    let entitled = null; // userId -> Set(locationId), fetched once per tick when something is due
     for (const sched of await store.all()) {
-      if (String(sched.locationId || '').startsWith('campaign:')) continue;
+      if (!sched.key || !sched.userId) continue; // legacy rows from the token era are ignored
       if (!isDue(sched)) continue;
+      if (!entitled) {
+        entitled = new Map();
+        for (const u of await hub.entitledUsers()) entitled.set(u.userId, new Set(u.connections.map((c) => c.location_id)));
+      }
+      if (!entitled.get(sched.userId)?.has(sched.locationId)) { console.log(`[schedule] skipping ${sched.key}: not entitled or disconnected`); continue; }
       sched.lastRunDate = localClock(sched.timezone).date;
       await store.put(sched);
-      console.log(`[schedule] running ${sched.locationId}`);
+      console.log(`[schedule] running ${sched.key}`);
       const r = await runSchedule(sched);
-      console.log(`[schedule] ${sched.locationId}: ${r.outcome || r.skipped} - ${r.message || ''}`);
+      console.log(`[schedule] ${sched.key}: ${r.outcome || r.skipped} - ${r.message || ''}`);
     }
   } catch (err) {
     console.error('[schedule] tick failed', err.message);
@@ -410,40 +417,61 @@ async function tick() {
 // ---------- HTTP ----------
 
 const app = express();
+app.set('trust proxy', 1);
 app.use(express.json({ limit: '100kb' }));
-app.use(express.static(path.join(__dirname, 'public')));
+app.use(cookieParser());
 
-app.get('/health', (req, res) => res.json({ ok: true, service: 'blast-no-reply-finder' }));
+app.get('/health', (req, res) => res.json({ ok: true, service: 'blast-tools' }));
+app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
+app.get('/app', hub.requireToolPage, (req, res) => res.sendFile(path.join(__dirname, 'public', 'app.html')));
+app.get('/config.js', (req, res) => res.type('application/javascript').send(`window.HUB_URL=${JSON.stringify(hub.HUB_URL)};window.TOOL_SLUG="blast-tools";`));
+app.use(express.static(path.join(__dirname, 'public'), { index: false }));
 
-const campaign = require('./campaign')({ ghl, store, findLastInbound, localClock, runScan, findBlasts, CONVERSATIONS_VERSION, CONTACTS_VERSION });
-app.use('/api/campaign', campaign.router);
+// Every API route needs a hub session + entitlement (or admin). 401/402 come back as JSON.
+app.use('/api', hub.requireTool);
+app.get('/api/me', hub.me);
 
-function creds(req, res) {
-  const token = String(req.body?.token || '').trim();
-  const locationId = String(req.body?.locationId || '').trim();
-  if (!token || !locationId) {
-    res.status(400).json({ error: 'Location ID and token are both required.' });
+// The offer-campaign module (campaign.js) is parked: not mounted until it is moved onto
+// hub credentials too. Its routes took a raw token in the body, so leaving it unmounted
+// is what locks it.
+
+// Sub-account token for this request, from the hub. The location must be one the
+// logged-in user has connected.
+async function creds(req, res, forcedLocationId) {
+  const locationId = String(forcedLocationId || req.body?.locationId || req.query?.locationId || '').trim();
+  if (!locationId) { res.status(400).json({ error: 'Pick a sub-account first.' }); return null; }
+  try {
+    const c = await hub.credentials(req, locationId);
+    return { token: c.pit, locationId: c.locationId };
+  } catch (err) {
+    res.status(err.status || 400).json({ error: err.message });
     return null;
   }
-  return { token, locationId };
 }
+
+const schedKey = (req, locationId) => `${req.hubUser.id}:${locationId}`;
 
 function getScan(req, res) {
   const scan = scans.get(req.params.id);
-  if (!scan) { res.status(404).json({ error: 'That scan has expired. Run the search again.' }); return null; }
+  if (!scan || scan.owner !== req.hubUser.id) { res.status(404).json({ error: 'That scan has expired. Run the search again.' }); return null; }
   return scan;
+}
+function ownedJob(map, req, res, label) {
+  const job = map.get(req.params.id);
+  if (!job || job.owner !== req.hubUser.id) { res.status(404).json({ error: `${label} not found.` }); return null; }
+  return job;
 }
 
 function range(q) {
   return { from: Number(q.from), to: Number(q.to), contains: String(q.contains || ''), mode: q.mode === 'since' ? 'since' : 'ever' };
 }
 
-app.post('/api/scan', (req, res) => {
-  const c = creds(req, res);
+app.post('/api/scan', async (req, res) => {
+  const c = await creds(req, res);
   if (!c) return;
   const days = Math.min(90, Math.max(1, Number(req.body.days) || 7));
   const id = crypto.randomUUID();
-  const scan = { status: 'running', scanned: 0, items: [], createdAt: Date.now(), days };
+  const scan = { status: 'running', scanned: 0, items: [], createdAt: Date.now(), days, owner: req.hubUser.id, locationId: c.locationId };
   scans.set(id, scan);
   runScan(scan, { ...c, days });
   res.json({ scanId: id });
@@ -488,10 +516,10 @@ app.get('/api/scan/:id/contacts.csv', (req, res) => {
   res.send(rows.join('\n'));
 });
 
-app.post('/api/scan/:id/tag', (req, res) => {
+app.post('/api/scan/:id/tag', async (req, res) => {
   const scan = getScan(req, res);
   if (!scan) return;
-  const c = creds(req, res);
+  const c = await creds(req, res, scan.locationId);
   if (!c) return;
   const tag = String(req.body.tag || '').trim().toLowerCase();
   if (!tag) return res.status(400).json({ error: 'Enter a tag name.' });
@@ -499,57 +527,51 @@ app.post('/api/scan/:id/tag', (req, res) => {
   const { contacts } = selectContacts(scan, from, to, contains, mode);
   if (!contacts.length) return res.status(400).json({ error: 'No contacts match that selection.' });
   const id = crypto.randomUUID();
-  const job = { status: 'running', done: 0, failed: 0, total: contacts.length, tag, createdAt: Date.now() };
+  const job = { status: 'running', done: 0, failed: 0, total: contacts.length, tag, createdAt: Date.now(), owner: req.hubUser.id };
   tagJobs.set(id, job);
   runTagJob(job, c.token, contacts, tag);
   res.json({ jobId: id, total: contacts.length });
 });
 
-app.post('/api/scan/:id/verify', (req, res) => {
+app.post('/api/scan/:id/verify', async (req, res) => {
   const scan = getScan(req, res);
   if (!scan) return;
-  const c = creds(req, res);
+  const c = await creds(req, res, scan.locationId);
   if (!c) return;
   const from = Number(req.body.from), to = Number(req.body.to);
   const items = scan.items.filter((it) => it.ts >= from && it.ts <= to && !it.checked);
   const id = crypto.randomUUID();
-  const job = { status: items.length ? 'running' : 'done', done: 0, failed: 0, total: items.length, createdAt: Date.now() };
+  const job = { status: items.length ? 'running' : 'done', done: 0, failed: 0, total: items.length, createdAt: Date.now(), owner: req.hubUser.id };
   verifyJobs.set(id, job);
   if (items.length) runVerifyJob(job, c.token, items);
   res.json({ jobId: id, total: items.length });
 });
 
 app.get('/api/verify/:id', (req, res) => {
-  const job = verifyJobs.get(req.params.id);
-  if (!job) return res.status(404).json({ error: 'Check not found.' });
+  const job = ownedJob(verifyJobs, req, res, 'Check');
+  if (!job) return;
   res.json({ status: job.status, done: job.done, failed: job.failed, total: job.total, error: job.error || null, lastError: job.lastError || null });
 });
 
 app.get('/api/tag/:id', (req, res) => {
-  const job = tagJobs.get(req.params.id);
-  if (!job) return res.status(404).json({ error: 'Tag job not found.' });
+  const job = ownedJob(tagJobs, req, res, 'Tag job');
+  if (!job) return;
   res.json({ status: job.status, done: job.done, failed: job.failed, total: job.total, tag: job.tag, error: job.error || null, lastError: job.lastError || null });
 });
 
-// A token proves the caller can act for this sub-account: it must work against
-// GHL for that location before a schedule is shown, changed or removed.
+// Schedules belong to the hub user + sub-account; the hub already proved the
+// user owns that connection, so no GHL round-trip is needed here.
 async function authed(req, res) {
-  const c = creds(req, res);
-  if (!c) return null;
-  try {
-    const qs = new URLSearchParams({ locationId: c.locationId, limit: '1' });
-    await ghl(c.token, 'GET', `/conversations/search?${qs}`, CONVERSATIONS_VERSION);
-    return c;
-  } catch (err) {
-    res.status(err.status === 401 || err.status === 403 ? 401 : 502).json({ error: err.message });
-    return null;
-  }
+  const locationId = String(req.body?.locationId || '').trim();
+  if (!locationId) { res.status(400).json({ error: 'Pick a sub-account first.' }); return null; }
+  if (!(req.hubUser.connections || []).some((x) => x.location_id === locationId)) { res.status(400).json({ error: 'That sub-account is not connected to your account.' }); return null; }
+  return { locationId, key: schedKey(req, locationId) };
 }
 
 app.post('/api/schedule/get', async (req, res) => {
   const c = await authed(req, res);
   if (!c) return;
-  const s = await store.get(c.locationId);
+  const s = await store.get(c.key);
   res.json({ schedule: publicSchedule(s), storage: store.kind });
 });
 
@@ -561,10 +583,11 @@ app.post('/api/schedule/save', async (req, res) => {
   if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(time)) return res.status(400).json({ error: 'Pick a time.' });
   const timezone = String(b.timezone || '');
   if (!zoneOk(timezone)) return res.status(400).json({ error: 'Pick a valid timezone.' });
-  const prev = (await store.get(c.locationId)) || {};
+  const prev = (await store.get(c.key)) || {};
   const sched = {
+    key: c.key,
+    userId: req.hubUser.id,
     locationId: c.locationId,
-    token: c.token,
     enabled: !!b.enabled,
     time, timezone,
     days: b.days === 'weekdays' ? 'weekdays' : 'daily',
@@ -591,7 +614,7 @@ app.post('/api/schedule/save', async (req, res) => {
 app.post('/api/schedule/delete', async (req, res) => {
   const c = await authed(req, res);
   if (!c) return;
-  await store.remove(c.locationId);
+  await store.remove(c.key);
   res.json({ ok: true });
 });
 
@@ -600,19 +623,18 @@ app.post('/api/schedule/delete', async (req, res) => {
 app.post('/api/schedule/run', async (req, res) => {
   const c = await authed(req, res);
   if (!c) return;
-  const s = await store.get(c.locationId);
+  const s = await store.get(c.key);
   if (!s) return res.status(404).json({ error: 'Save the schedule first.' });
-  if (running.has(c.locationId)) return res.status(409).json({ error: 'A run is already in progress.' });
+  if (running.has(c.key)) return res.status(409).json({ error: 'A run is already in progress.' });
   runSchedule(s, { force: true });
   res.json({ started: true });
 });
 
 app.post('/api/schedule/status', async (req, res) => {
-  const c = creds(req, res);
+  const c = await authed(req, res);
   if (!c) return;
-  const s = await store.get(c.locationId);
-  if (!s || s.token !== c.token) return res.status(401).json({ error: 'Not authorized.' });
-  res.json({ running: running.has(c.locationId), schedule: publicSchedule(s) });
+  const s = await store.get(c.key);
+  res.json({ running: running.has(c.key), schedule: publicSchedule(s) });
 });
 
 setInterval(() => {
@@ -626,8 +648,5 @@ store.init().then(() => {
   console.log(`schedule storage: ${store.kind}`);
   setInterval(tick, TICK_MS).unref();
   setTimeout(tick, 5000).unref();
-  const campaignEvery = Number(process.env.CAMPAIGN_TICK_MS || 2 * 60000);
-  setInterval(campaign.tick, campaignEvery).unref();
-  setTimeout(campaign.tick, 8000).unref();
-  app.listen(PORT, () => console.log(`blast-no-reply-finder listening on ${PORT}`));
+  app.listen(PORT, () => console.log(`blast-tools listening on ${PORT}`));
 }).catch((err) => { console.error('storage init failed:', err.message); process.exit(1); });
