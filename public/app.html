@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Blast Tools · RGS Tools</title>
+<title>Blast Follow-Up · RGS Tools</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
 <script src="/config.js"></script>
@@ -346,7 +346,7 @@ function startState() {
   const l = curLoc();
   if (!l) {
     $('scanStatus').innerHTML = '&nbsp;';
-    listEmpty(`<div class="empty" style="padding:40px 12px">${RGS.glyph('link', '--t-cyan')}<b>Connect a sub-account</b>Blast Tools reads your texts straight from GHL. Connect one and pick it in the sidebar.<div style="margin-top:14px"><a class="btn lg" href="${esc(window.HUB_URL)}/app#connect">Connect a sub-account</a></div></div>`);
+    listEmpty(`<div class="empty" style="padding:40px 12px">${RGS.glyph('link', '--t-cyan')}<b>Connect a sub-account</b>Blast Follow-Up reads your texts straight from GHL. Connect one and pick it in the sidebar.<div style="margin-top:14px"><a class="btn lg" href="${esc(window.HUB_URL)}/app#connect">Connect a sub-account</a></div></div>`);
   } else {
     $('scanStatus').textContent = l.label;
     listEmpty(`<div class="empty" style="padding:40px 12px">${RGS.glyph('message', '--t-green')}<b>Find your recent blasts</b>We'll look through ${esc(l.label)} for texts sent in bulk, then show who never replied.<div style="margin-top:14px"><button class="btn lg" data-act="scan">Find blasts</button></div></div>`);

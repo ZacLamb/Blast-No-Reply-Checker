@@ -428,6 +428,17 @@ const bg = (job, p) => Promise.resolve(p).catch((err) => {
   job.error = job.error || err.message || 'Something went wrong. Please try again.';
 });
 app.set('trust proxy', 1);
+// Domain move: when CANONICAL_HOST is set (e.g. fields.revenuegeneratingsolutions.com), page visits that arrive on any
+// other host (the old yourbizzassist.co address) get a permanent redirect there. Off until the variable is set.
+// API calls, webhooks, internal calls and Railway's own *.railway.app host are never redirected.
+app.use((req, res, next) => {
+  const want = String(process.env.CANONICAL_HOST || '').trim().toLowerCase();
+  const host = String(req.headers['x-forwarded-host'] || req.headers.host || '').split(',')[0].trim().toLowerCase().replace(/:\d+$/, '');
+  if (!want || !host || host === want || host === 'localhost' || host.endsWith('.railway.app') || host.endsWith('.railway.internal')) return next();
+  if (!['GET', 'HEAD'].includes(req.method) || /^\/(api|internal)(\/|$)/.test(req.path)) return next();
+  res.redirect(301, `https://${want}${req.originalUrl}`);
+});
+
 app.use(express.json({ limit: '100kb' }));
 app.use(cookieParser());
 
