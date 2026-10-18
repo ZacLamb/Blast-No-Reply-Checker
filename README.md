@@ -1,4 +1,4 @@
-# Blast Tools
+# Blast Follow-Up
 
 Find the most recent SMS blast in a GoHighLevel sub-account, check every contact's reply
 history, and tag the non-responders so you can resend from GHL. Optionally runs daily.
