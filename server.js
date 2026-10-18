@@ -51,6 +51,7 @@ async function ghl(token, method, pathAndQuery, version, body) {
           ...(body ? { 'Content-Type': 'application/json' } : {}),
         },
         body: body ? JSON.stringify(body) : undefined,
+        signal: AbortSignal.timeout(60000), // a stalled GHL call can't hang a job forever
       });
     } catch (err) {
       if (attempt < 4) { await sleep(1000 * (attempt + 1)); continue; }
@@ -417,6 +418,15 @@ async function tick() {
 // ---------- HTTP ----------
 
 const app = express();
+// Express 4 does not catch rejected promises from async handlers; pass them to the
+// JSON error handler at the bottom instead of letting them crash the process.
+const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
+// Background jobs run after the response is sent; a crash there records an error state.
+const bg = (job, p) => Promise.resolve(p).catch((err) => {
+  console.error('[job] failed', err);
+  job.status = 'error';
+  job.error = job.error || err.message || 'Something went wrong. Please try again.';
+});
 app.set('trust proxy', 1);
 app.use(express.json({ limit: '100kb' }));
 app.use(cookieParser());
@@ -467,16 +477,16 @@ function range(q) {
   return { from: Number(q.from), to: Number(q.to), contains: String(q.contains || ''), mode: q.mode === 'since' ? 'since' : 'ever' };
 }
 
-app.post('/api/scan', async (req, res) => {
+app.post('/api/scan', wrap(async (req, res) => {
   const c = await creds(req, res);
   if (!c) return;
   const days = Math.min(90, Math.max(1, Number(req.body.days) || 7));
   const id = crypto.randomUUID();
   const scan = { status: 'running', scanned: 0, items: [], createdAt: Date.now(), days, owner: req.hubUser.id, locationId: c.locationId };
   scans.set(id, scan);
-  runScan(scan, { ...c, days });
+  bg(scan, runScan(scan, { ...c, days }));
   res.json({ scanId: id });
-});
+}));
 
 app.get('/api/scan/:id', (req, res) => {
   const scan = getScan(req, res);
@@ -517,7 +527,7 @@ app.get('/api/scan/:id/contacts.csv', (req, res) => {
   res.send(rows.join('\n'));
 });
 
-app.post('/api/scan/:id/tag', async (req, res) => {
+app.post('/api/scan/:id/tag', wrap(async (req, res) => {
   const scan = getScan(req, res);
   if (!scan) return;
   const c = await creds(req, res, scan.locationId);
@@ -530,11 +540,11 @@ app.post('/api/scan/:id/tag', async (req, res) => {
   const id = crypto.randomUUID();
   const job = { status: 'running', done: 0, failed: 0, total: contacts.length, tag, createdAt: Date.now(), owner: req.hubUser.id };
   tagJobs.set(id, job);
-  runTagJob(job, c.token, contacts, tag);
+  bg(job, runTagJob(job, c.token, contacts, tag));
   res.json({ jobId: id, total: contacts.length });
-});
+}));
 
-app.post('/api/scan/:id/verify', async (req, res) => {
+app.post('/api/scan/:id/verify', wrap(async (req, res) => {
   const scan = getScan(req, res);
   if (!scan) return;
   const c = await creds(req, res, scan.locationId);
@@ -544,9 +554,9 @@ app.post('/api/scan/:id/verify', async (req, res) => {
   const id = crypto.randomUUID();
   const job = { status: items.length ? 'running' : 'done', done: 0, failed: 0, total: items.length, createdAt: Date.now(), owner: req.hubUser.id };
   verifyJobs.set(id, job);
-  if (items.length) runVerifyJob(job, c.token, items);
+  if (items.length) bg(job, runVerifyJob(job, c.token, items));
   res.json({ jobId: id, total: items.length });
-});
+}));
 
 app.get('/api/verify/:id', (req, res) => {
   const job = ownedJob(verifyJobs, req, res, 'Check');
@@ -569,14 +579,14 @@ async function authed(req, res) {
   return { locationId, key: schedKey(req, locationId) };
 }
 
-app.post('/api/schedule/get', async (req, res) => {
+app.post('/api/schedule/get', wrap(async (req, res) => {
   const c = await authed(req, res);
   if (!c) return;
   const s = await store.get(c.key);
   res.json({ schedule: publicSchedule(s), storage: store.kind });
-});
+}));
 
-app.post('/api/schedule/save', async (req, res) => {
+app.post('/api/schedule/save', wrap(async (req, res) => {
   const c = await authed(req, res);
   if (!c) return;
   const b = req.body || {};
@@ -610,33 +620,44 @@ app.post('/api/schedule/save', async (req, res) => {
   if (sched.enabled && changedTiming && clock.hm < time) sched.lastRunDate = null;
   await store.put(sched);
   res.json({ schedule: publicSchedule(sched), storage: store.kind });
-});
+}));
 
-app.post('/api/schedule/delete', async (req, res) => {
+app.post('/api/schedule/delete', wrap(async (req, res) => {
   const c = await authed(req, res);
   if (!c) return;
   await store.remove(c.key);
   res.json({ ok: true });
-});
+}));
 
 // "Run now" uses the saved settings and ignores the once-per-blast guard, so
 // it behaves like pressing the buttons by hand.
-app.post('/api/schedule/run', async (req, res) => {
+app.post('/api/schedule/run', wrap(async (req, res) => {
   const c = await authed(req, res);
   if (!c) return;
   const s = await store.get(c.key);
   if (!s) return res.status(404).json({ error: 'Save the schedule first.' });
   if (running.has(c.key)) return res.status(409).json({ error: 'A run is already in progress.' });
-  runSchedule(s, { force: true });
+  runSchedule(s, { force: true }).catch((err) => console.error('[schedule] run failed', err));
   res.json({ started: true });
-});
+}));
 
-app.post('/api/schedule/status', async (req, res) => {
+app.post('/api/schedule/status', wrap(async (req, res) => {
   const c = await authed(req, res);
   if (!c) return;
   const s = await store.get(c.key);
   res.json({ running: running.has(c.key), schedule: publicSchedule(s) });
+}));
+
+// Anything thrown above (hub outage, storage error) comes back as JSON, never a crash or a hang.
+app.use((err, req, res, next) => {
+  const status = err.status >= 400 && err.status < 600 ? err.status : 500;
+  if (status >= 500) console.error(`[http] ${req.method} ${req.originalUrl}`, err);
+  if (res.headersSent) return res.end();
+  const msg = err.type === 'entity.parse.failed' ? 'The request was not valid JSON.' : err.expose ? err.message : 'Something went wrong on our side. Please try again.';
+  res.status(status).json({ error: msg });
 });
+
+process.on('unhandledRejection', (err) => console.error('[unhandledRejection]', err));
 
 setInterval(() => {
   const now = Date.now();
@@ -647,7 +668,7 @@ setInterval(() => {
 
 store.init().then(() => {
   console.log(`schedule storage: ${store.kind}`);
-  setInterval(tick, TICK_MS).unref();
+  setInterval(tick, TICK_MS).unref(); // tick() catches its own errors
   setTimeout(tick, 5000).unref();
   app.listen(PORT, () => console.log(`blast-tools listening on ${PORT}`));
 }).catch((err) => { console.error('storage init failed:', err.message); process.exit(1); });
