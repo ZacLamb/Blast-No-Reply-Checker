@@ -50,11 +50,16 @@ module.exports = function hubClient({ toolSlug }) {
   async function resolve(req) {
     const s = sessionFrom(req);
     if (!s) return { status: 401 };
-    const p = await profile(s.uid);
+    let p;
+    try { p = await profile(s.uid); } catch (e) { if (e.status === 404) return { status: 401 }; throw e; } // account deleted
     req.hubUser = { id: p.user.id, email: p.user.email, isAdmin: p.user.is_admin, tools: p.tools, connections: p.connections };
     if (!p.tools.includes(toolSlug) && !p.user.is_admin) return { status: 402 };
     return { status: 200 };
   }
+
+  // The hub being down or slow must answer the request, not leave it hanging or crash the tool.
+  const HUB_DOWN = 'Could not reach RGS Tools to check your account. Please try again in a minute.';
+  const hubDown = (e) => console.error(`[hub-client] ${e.message}`);
 
   const loginUrl = (req) => `${HUB_URL}/login?return=${encodeURIComponent(`${req.protocol}://${req.get('host')}${req.originalUrl}`)}`;
 
@@ -63,8 +68,8 @@ module.exports = function hubClient({ toolSlug }) {
       const { status } = await resolve(req);
       if (status === 401) return res.status(401).json({ error: 'not_logged_in', login: loginUrl(req) });
       if (status === 402) return res.status(402).json({ error: 'not_subscribed', subscribe: `${HUB_URL}/app?tool=${toolSlug}` });
-      next();
-    } catch (e) { next(e); }
+    } catch (e) { hubDown(e); return res.status(502).json({ error: HUB_DOWN }); }
+    next();
   }
 
   async function requireToolPage(req, res, next) {
@@ -72,8 +77,8 @@ module.exports = function hubClient({ toolSlug }) {
       const { status } = await resolve(req);
       if (status === 401) return res.redirect(loginUrl(req));
       if (status === 402) return res.redirect(`${HUB_URL}/app?tool=${toolSlug}`);
-      next();
-    } catch (e) { next(e); }
+    } catch (e) { hubDown(e); return res.status(502).type('text').send(HUB_DOWN); }
+    next();
   }
 
   // Pick the connection: explicit locationId must belong to the user; otherwise the only one.
@@ -106,7 +111,7 @@ module.exports = function hubClient({ toolSlug }) {
   async function reportTokenError(userId, locationId, error) {
     await fetch(`${HUB_URL}/internal/connections/${userId}/${encodeURIComponent(locationId)}/error`, {
       method: 'POST', headers: { 'x-hub-service-key': SERVICE_KEY, 'content-type': 'application/json' },
-      body: JSON.stringify({ error }),
+      body: JSON.stringify({ error }), signal: AbortSignal.timeout(8000),
     }).catch(() => {});
   }
 
