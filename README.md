@@ -61,3 +61,19 @@ now" runs the saved settings immediately. The last ten runs are listed on the
 page.
 
 Schedules live in Postgres when `DATABASE_URL` is set, otherwise in a JSON file.
+
+## API usage reporting
+
+Blast Follow-Up reports how much of RGS Tools' GHL API allowance it uses per sub-account, shown on
+Backup & Insights › Usage › RGS Tools API usage. `ghl()` in `server.js` reads HighLevel's rate-limit headers
+(`X-RateLimit-Daily-Remaining`, `X-RateLimit-Remaining`, …) on every response, counts calls per sub-account,
+and sends a batch to the hub (`POST /internal/api-usage`) every 60 s and on shutdown. It is fire-and-forget:
+a slow or unreachable hub never slows or fails a request, and tokens are never logged or sent.
+`ghl-usage.js` is a copy of the hub's `hub-client/ghl-usage.js`; keep them in sync.
+
+Uses the existing `HUB_URL` + `HUB_SERVICE_KEY`. Optional:
+
+| Var | Default | |
+|---|---|---|
+| `API_USAGE_REPORTING` | on | `off` stops reporting |
+| `API_USAGE_FLUSH_MS` | `60000` | how often counts are sent to the hub |
