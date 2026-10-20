@@ -12,6 +12,10 @@
 const express = require('express');
 const cookieParser = require('cookie-parser');
 const hub = require('./hub-client')({ toolSlug: 'blast-tools' });
+// GHL API usage per sub-account (Backup & Insights › Usage): tokens from the hub are mapped to their
+// sub-account, and ghl() records the rate-limit headers of every response, retries included.
+const apiUsage = require('./ghl-usage')({ tool: 'blast-tools' });
+apiUsage.bindHub(hub);
 const crypto = require('crypto');
 const path = require('path');
 const fs = require('fs');
@@ -57,6 +61,7 @@ async function ghl(token, method, pathAndQuery, version, body) {
       if (attempt < 4) { await sleep(1000 * (attempt + 1)); continue; }
       throw new Error(`Could not reach GHL: ${err.message}`);
     }
+    apiUsage.record(res, { token });
     if ((res.status === 429 || res.status >= 500) && attempt < 4) {
       await sleep(2500 * (attempt + 1));
       continue;
