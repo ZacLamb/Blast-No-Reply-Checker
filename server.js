@@ -259,6 +259,64 @@ async function verifyAll(token, items) {
   return job;
 }
 
+// ---------- Unanswered replies ----------
+// Conversations whose LAST message is inbound: the contact texted (or called, emailed,
+// chatted) and nobody in the sub-account has answered since. Opt-out words are left out,
+// since those don't need a reply.
+
+const unansweredJobs = new Map(); // jobId -> { status, scanned, items, error, createdAt, owner, locationId, days, channel }
+const OPT_OUT = /^\s*(stop|stopall|unsubscribe|end|quit|cancel|optout|opt out|remove)\s*[.!]*\s*$/i;
+
+async function runUnanswered(job, { token, locationId, days, channel, minWaitMin }) {
+  const cutoff = Date.now() - days * 86400000;
+  const newest = Date.now() - minWaitMin * 60000;
+  const seen = new Set();
+  const byContact = new Map();
+  try {
+    const types = channel === 'sms' ? ['TYPE_SMS'] : [null];
+    for (const type of types) {
+      let cursor = null;
+      for (let page = 0; page < 400; page++) {
+        const qs = new URLSearchParams({ locationId, limit: '100', sort: 'desc', sortBy: 'last_message_date', lastMessageDirection: 'inbound' });
+        if (type) qs.set('lastMessageType', type);
+        if (cursor !== null) qs.set('startAfterDate', String(cursor));
+        const data = await ghl(token, 'GET', `/conversations/search?${qs}`, CONVERSATIONS_VERSION);
+        const list = data.conversations || [];
+        if (!list.length) break;
+        let fresh = 0, oldest = Infinity;
+        for (const c of list) {
+          const ts = tsOf(c);
+          if (ts < oldest) oldest = ts;
+          if (seen.has(c.id)) continue;
+          seen.add(c.id); fresh++;
+          const mtype = String(c.lastMessageType || '');
+          if (!c.contactId || c.lastMessageDirection === 'outbound') continue;
+          if (mtype.startsWith('TYPE_ACTIVITY') || mtype === 'TYPE_INTERNAL_COMMENTS') continue;
+          if (ts < cutoff || ts > newest) continue;
+          job.optOuts = job.optOuts || 0;
+          if (OPT_OUT.test(c.lastMessageBody || '')) { job.optOuts++; continue; }
+          const prev = byContact.get(c.contactId);
+          if (prev && prev.ts >= ts) continue;
+          byContact.set(c.contactId, {
+            conversationId: c.id, contactId: c.contactId,
+            name: c.fullName || c.contactName || '', phone: c.phone || '', email: c.email || '',
+            body: c.lastMessageBody || '', type: mtype.replace(/^TYPE_/, '').toLowerCase(), ts,
+            unread: Number(c.unreadCount) || 0,
+          });
+        }
+        job.scanned = byContact.size;
+        if (oldest < cutoff) break;
+        if (fresh === 0) { if (cursor === oldest) break; cursor = oldest; } else { cursor = oldest + 1; }
+      }
+    }
+    job.items = [...byContact.values()].sort((a, b) => a.ts - b.ts); // longest wait first
+    job.status = 'done';
+  } catch (err) {
+    job.status = 'error';
+    job.error = err.message;
+  }
+}
+
 // ---------- Tagging ----------
 
 async function runTagJob(job, token, contacts, tag) {
@@ -586,6 +644,63 @@ app.get('/api/tag/:id', (req, res) => {
   res.json({ status: job.status, done: job.done, failed: job.failed, total: job.total, tag: job.tag, error: job.error || null, lastError: job.lastError || null });
 });
 
+// ---------- Unanswered replies routes ----------
+app.post('/api/unanswered', wrap(async (req, res) => {
+  const c = await creds(req, res);
+  if (!c) return;
+  const days = Math.min(90, Math.max(1, Number(req.body.days) || 7));
+  const channel = req.body.channel === 'all' ? 'all' : 'sms';
+  const minWaitMin = Math.min(7 * 1440, Math.max(0, Number(req.body.minWait) || 0));
+  const id = crypto.randomUUID();
+  const job = { status: 'running', scanned: 0, items: [], createdAt: Date.now(), owner: req.hubUser.id, locationId: c.locationId, days, channel, minWaitMin };
+  unansweredJobs.set(id, job);
+  bg(job, runUnanswered(job, { ...c, days, channel, minWaitMin }));
+  res.json({ id });
+}));
+
+app.get('/api/unanswered/:id', (req, res) => {
+  const job = ownedJob(unansweredJobs, req, res, 'Check');
+  if (!job) return;
+  const out = { status: job.status, scanned: job.scanned, error: job.error || null, locationId: job.locationId };
+  if (job.status === 'done') {
+    out.count = job.items.length;
+    out.optOuts = job.optOuts || 0;
+    out.oldest = job.items[0]?.ts || null;
+    out.rows = job.items.slice(0, 300).map(({ conversationId, contactId, name, phone, email, body, type, ts, unread }) => ({ conversationId, contactId, name, phone, email, body, type, ts, unread }));
+  }
+  res.json(out);
+});
+
+app.get('/api/unanswered/:id/contacts.csv', (req, res) => {
+  const job = ownedJob(unansweredJobs, req, res, 'Check');
+  if (!job) return;
+  const q = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+  const esc = (v) => q(String(v ?? '').replace(/^([=+\-@])/, "'$1"));
+  const rows = [['Contact ID', 'Name', 'Phone', 'Email', 'Channel', 'Their last message', 'Sent at (UTC)', 'Waiting (hours)'].map(esc).join(',')];
+  for (const it of job.items) {
+    rows.push([q(it.contactId), esc(it.name), q(it.phone), q(it.email), q(it.type), esc(it.body), q(new Date(it.ts).toISOString()), q(((Date.now() - it.ts) / 3600000).toFixed(1))].join(','));
+  }
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', 'attachment; filename="unanswered-replies.csv"');
+  res.send(rows.join('\n'));
+});
+
+app.post('/api/unanswered/:id/tag', wrap(async (req, res) => {
+  const job = ownedJob(unansweredJobs, req, res, 'Check');
+  if (!job) return;
+  if (job.status !== 'done') return res.status(409).json({ error: 'The check is not finished yet.' });
+  const c = await creds(req, res, job.locationId);
+  if (!c) return;
+  const tag = String(req.body.tag || '').trim().toLowerCase();
+  if (!tag) return res.status(400).json({ error: 'Enter a tag name.' });
+  if (!job.items.length) return res.status(400).json({ error: 'Nobody is waiting on a reply.' });
+  const id = crypto.randomUUID();
+  const t = { status: 'running', done: 0, failed: 0, total: job.items.length, tag, createdAt: Date.now(), owner: req.hubUser.id };
+  tagJobs.set(id, t);
+  bg(t, runTagJob(t, c.token, job.items, tag));
+  res.json({ jobId: id, total: job.items.length });
+}));
+
 // Schedules belong to the hub user + sub-account; the hub already proved the
 // user owns that connection, so no GHL round-trip is needed here.
 async function authed(req, res) {
@@ -680,6 +795,7 @@ setInterval(() => {
   for (const [id, s] of scans) if (now - s.createdAt > KEEP_MS) scans.delete(id);
   for (const [id, j] of tagJobs) if (now - j.createdAt > KEEP_MS) tagJobs.delete(id);
   for (const [id, j] of verifyJobs) if (now - j.createdAt > KEEP_MS) verifyJobs.delete(id);
+  for (const [id, j] of unansweredJobs) if (now - j.createdAt > KEEP_MS) unansweredJobs.delete(id);
 }, 10 * 60 * 1000).unref();
 
 store.init().then(() => {
