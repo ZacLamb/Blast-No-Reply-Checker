@@ -33,17 +33,21 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // ---------- GHL client (rate limited, retries on 429 / 5xx) ----------
 
-let nextSlot = 0;
-function throttle() {
+// GHL's limit is per sub-account, so each token gets its own pace: one user's check
+// no longer waits behind another sub-account's.
+const nextSlots = new Map(); // token -> next free slot (ms)
+function throttle(token) {
   const now = Date.now();
-  const wait = Math.max(0, nextSlot - now);
-  nextSlot = Math.max(now, nextSlot) + 1000 / MAX_RPS;
+  const slot = nextSlots.get(token) || 0;
+  const wait = Math.max(0, slot - now);
+  nextSlots.set(token, Math.max(now, slot) + 1000 / MAX_RPS);
+  if (nextSlots.size > 2000) for (const [k, v] of nextSlots) if (v < now - 60000) nextSlots.delete(k);
   return sleep(wait);
 }
 
 async function ghl(token, method, pathAndQuery, version, body) {
   for (let attempt = 0; ; attempt++) {
-    await throttle();
+    await throttle(token);
     let res;
     try {
       res = await fetch(GHL_BASE + pathAndQuery, {
@@ -267,6 +271,37 @@ async function verifyAll(token, items) {
 const unansweredJobs = new Map(); // jobId -> { status, scanned, items, error, createdAt, owner, locationId, days, channel }
 const OPT_OUT = /^\s*(stop|stopall|unsubscribe|end|quit|cancel|optout|opt out|remove)\s*[.!]*\s*$/i;
 
+const dndCache = new Map(); // `${locationId}:${contactId}` -> { dnd, at }
+const DND_TTL = 60 * 60 * 1000;
+async function checkDnd(job, token, locationId, order) {
+  let next = 0;
+  const worker = async () => {
+    for (;;) {
+      const i = next++; if (i >= order.length || job.dndStop) return;
+      const it = order[i], key = `${locationId}:${it.contactId}`;
+      let hit = dndCache.get(key);
+      if (!hit || Date.now() - hit.at > DND_TTL) {
+        try {
+          const d = await ghl(token, 'GET', `/contacts/${encodeURIComponent(it.contactId)}`, CONTACTS_VERSION);
+          const ct = d.contact || {};
+          const sms = ct.dndSettings?.SMS?.status;
+          hit = { dnd: ct.dnd === true || sms === 'active' || sms === 'permanent', at: Date.now() };
+          dndCache.set(key, hit);
+        } catch (err) {
+          if (err.status === 401 || err.status === 403) { job.dndError = err.message; job.dndStop = true; return; }
+          hit = { dnd: false }; // unreadable contact: keep it on the list
+        }
+      }
+      if (hit.dnd) { it.dnd = true; job.dnd++; (job.dndIds ||= []).push(it.conversationId); }
+      job.dndChecked++;
+    }
+  };
+  await Promise.all(Array.from({ length: 8 }, worker));
+  job.items = job.items.filter((x) => !x.dnd);
+  job.dndDone = true;
+  if (dndCache.size > 50000) for (const [k, v] of dndCache) if (Date.now() - v.at > DND_TTL) dndCache.delete(k);
+}
+
 async function runUnanswered(job, { token, locationId, days, channel, minWaitMin }) {
   const cutoff = Date.now() - days * 86400000;
   const newest = Date.now() - minWaitMin * 60000;
@@ -316,26 +351,13 @@ async function runUnanswered(job, { token, locationId, days, channel, minWaitMin
       job.handled = 0;
       items = items.filter((it) => { const h = handled.get(it.conversationId); if (h && h >= it.ts) { job.handled++; return false; } return true; });
     } catch (e) { console.error('handled lookup failed:', e.message); }
-    // Do Not Disturb contacts can't be texted back, so they don't belong on the list.
-    job.phase = 'dnd'; job.dndChecked = 0; job.dnd = 0; job.dndTotal = items.length;
-    const keep = new Array(items.length).fill(true);
-    let next = 0;
-    const worker = async () => {
-      for (;;) {
-        const i = next++; if (i >= items.length) return;
-        try {
-          const d = await ghl(token, 'GET', `/contacts/${encodeURIComponent(items[i].contactId)}`, CONTACTS_VERSION);
-          const ct = d.contact || {};
-          const sms = ct.dndSettings?.SMS?.status;
-          if (ct.dnd === true || sms === 'active' || sms === 'permanent') { keep[i] = false; job.dnd++; }
-        } catch (err) { if (err.status === 401 || err.status === 403) throw err; /* unreadable contact: keep it */ }
-        job.dndChecked++;
-      }
-    };
-    await Promise.all(Array.from({ length: 6 }, worker));
-    items = items.filter((_, i) => keep[i]);
+    // The list is ready now; Do Not Disturb is checked in the background (contacts can't be
+    // texted back, so they drop off the list as they're found). Order follows the view.
     job.items = items.sort((a, b) => a.ts - b.ts); // longest wait first
     job.status = 'done';
+    job.dndTotal = items.length; job.dndChecked = 0; job.dnd = 0; job.dndDone = false;
+    const order = job.sort === 'newest' ? [...job.items].reverse() : [...job.items];
+    bg(job, checkDnd(job, token, locationId, order));
   } catch (err) {
     job.status = 'error';
     job.error = err.message;
@@ -689,7 +711,7 @@ app.post('/api/unanswered', wrap(async (req, res) => {
   const channel = req.body.channel === 'all' ? 'all' : 'sms';
   const minWaitMin = Math.min(7 * 1440, Math.max(0, Number(req.body.minWait) || 0));
   const id = crypto.randomUUID();
-  const job = { status: 'running', scanned: 0, items: [], createdAt: Date.now(), owner: req.hubUser.id, locationId: c.locationId, days, channel, minWaitMin };
+  const job = { status: 'running', scanned: 0, items: [], createdAt: Date.now(), owner: req.hubUser.id, locationId: c.locationId, days, channel, minWaitMin, sort: req.body.sort === 'newest' ? 'newest' : 'oldest' };
   unansweredJobs.set(id, job);
   bg(job, runUnanswered(job, { ...c, days, channel, minWaitMin }));
   res.json({ id });
@@ -698,15 +720,16 @@ app.post('/api/unanswered', wrap(async (req, res) => {
 app.get('/api/unanswered/:id', (req, res) => {
   const job = ownedJob(unansweredJobs, req, res, 'Check');
   if (!job) return;
-  const out = { status: job.status, scanned: job.scanned, error: job.error || null, locationId: job.locationId, phase: job.phase || 'scan', dndChecked: job.dndChecked || 0, dndTotal: job.dndTotal || 0 };
+  const out = { status: job.status, scanned: job.scanned, error: job.error || null, locationId: job.locationId, dndChecked: job.dndChecked || 0, dndTotal: job.dndTotal || 0, dndDone: !!job.dndDone, dndIds: job.dndIds || [], dndError: job.dndError || null };
   if (job.status === 'done') {
-    out.count = job.items.length;
+    const live = job.items.filter((x) => !x.dnd);
+    out.count = live.length;
     out.optOuts = job.optOuts || 0;
     out.dnd = job.dnd || 0;
     out.handled = job.handled || 0;
-    out.oldest = job.items[0]?.ts || null;
+    out.oldest = live[0]?.ts || null;
     out.sort = req.query.sort === 'newest' ? 'newest' : 'oldest';
-    const ordered = out.sort === 'newest' ? [...job.items].reverse() : job.items;
+    const ordered = out.sort === 'newest' ? [...live].reverse() : live;
     out.rows = ordered.slice(0, 300).map(({ conversationId, contactId, name, phone, email, body, type, ts, unread, answered }) => ({ conversationId, contactId, name, phone, email, body, type, ts, unread, answered: answered || null }));
   }
   res.json(out);
@@ -718,7 +741,8 @@ app.get('/api/unanswered/:id/contacts.csv', (req, res) => {
   const q = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
   const esc = (v) => q(String(v ?? '').replace(/^([=+\-@])/, "'$1"));
   const rows = [['Contact ID', 'Name', 'Phone', 'Email', 'Channel', 'Their last message', 'Sent at (UTC)', 'Waiting (hours)'].map(esc).join(',')];
-  for (const it of (req.query.sort === 'newest' ? [...job.items].reverse() : job.items)) {
+  const liveItems = job.items.filter((x) => !x.dnd);
+  for (const it of (req.query.sort === 'newest' ? liveItems.reverse() : liveItems)) {
     rows.push([q(it.contactId), esc(it.name), q(it.phone), q(it.email), q(it.type), esc(it.body), q(new Date(it.ts).toISOString()), q(((Date.now() - it.ts) / 3600000).toFixed(1))].join(','));
   }
   res.setHeader('Content-Type', 'text/csv; charset=utf-8');
@@ -892,7 +916,8 @@ app.post('/api/unanswered/:id/tag', wrap(async (req, res) => {
   if (!c) return;
   const tag = String(req.body.tag || '').trim().toLowerCase();
   if (!tag) return res.status(400).json({ error: 'Enter a tag name.' });
-  const waiting = job.items.filter((x) => !x.answered);
+  if (!job.dndDone) return res.status(409).json({ error: `Still checking Do Not Disturb (${job.dndChecked || 0} of ${job.dndTotal || 0}). Try again in a moment.` });
+  const waiting = job.items.filter((x) => !x.answered && !x.dnd);
   if (!waiting.length) return res.status(400).json({ error: 'Nobody is waiting on a reply.' });
   const id = crypto.randomUUID();
   const t = { status: 'running', done: 0, failed: 0, total: waiting.length, tag, createdAt: Date.now(), owner: req.hubUser.id };
