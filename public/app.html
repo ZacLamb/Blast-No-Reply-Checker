@@ -84,6 +84,7 @@
   @media (max-width: 860px) { .li.un .rbox, .li.un .rerr { padding-left: 0; } }
 
   /* conversation sheet */
+  .li.un .re { display: inline-flex; align-items: center; gap: 6px; }
   .li.un .main b.nm { cursor: pointer; } .li.un .main b.nm:hover { color: var(--blue); text-decoration: underline; }
   #cvSheet .sheet { max-width: 640px; display: flex; flex-direction: column; max-height: calc(100vh - 96px); }
   #cvSheet .sheet-hd .sub { color: var(--sec); font-size: 12.5px; }
@@ -341,7 +342,7 @@
 
   <!-- Conversation sheet (Unanswered replies) -->
   <div class="sheet-bg" id="cvSheet"><div class="sheet" role="dialog" aria-modal="true">
-    <div class="sheet-hd"><span id="cvAv"></span><div style="min-width:0"><h2 id="cvName"></h2><div class="sub" id="cvSub"></div></div><a class="icon-btn x" id="cvOpen" target="_blank" rel="noopener" title="Open in GHL" style="color:var(--blue)"></a><button class="btn plain" id="cvClose">Done</button></div>
+    <div class="sheet-hd"><span id="cvAv"></span><div style="min-width:0"><h2 id="cvName"></h2><div class="sub" id="cvSub"></div></div><button class="btn sm tinted x" id="cvMark" hidden></button><a class="icon-btn" id="cvOpen" target="_blank" rel="noopener" title="Open in GHL" style="color:var(--blue)"></a><button class="btn plain" id="cvClose">Done</button></div>
     <div class="opps" id="cvOpps" hidden></div>
     <div class="thread" id="cvThread"></div>
     <div id="cvErr" class="cverr" hidden></div>
@@ -932,7 +933,7 @@ async function unRun() {
       if (seq !== un.seq) return;
       r = await api('/api/unanswered/' + id);
       if (r.status !== 'running') break;
-      $('unStatus').innerHTML = `<span class="spin"></span> Reading conversations… ${r.scanned} waiting so far`;
+      $('unStatus').innerHTML = r.phase === 'dnd' ? `<span class="spin"></span> Checking Do Not Disturb… ${r.dndChecked} of ${r.dndTotal}` : `<span class="spin"></span> Reading conversations… ${r.scanned} waiting so far`;
     }
     if (r.status === 'error') throw new Error(r.error || 'The check failed');
     $('unStatus').textContent = '';
@@ -943,20 +944,26 @@ async function unRun() {
     $('unOut').innerHTML = note('bad', 'alert', esc(e.message));
   } finally { if (seq === un.seq) $('unRun').disabled = false; }
 }
+const leftOut = (r) => [r.optOuts ? `${r.optOuts} opt-out` : '', r.dnd ? `${r.dnd} DND` : '', r.handled ? `${r.handled} marked replied` : ''].filter(Boolean).join(' · ');
+const rowEnd = (x) => x.answered === 'handled'
+  ? `<span class="pill">Marked replied</span><button class="btn sm plain" data-unmark="${esc(x.conversationId)}">Undo</button>`
+  : x.answered ? '<span class="pill ok">Replied</span>'
+  : `${x.phone ? `<button class="btn sm tinted" data-reply="${esc(x.conversationId)}">Reply</button>` : ''}<button class="btn sm plain" data-mark="${esc(x.conversationId)}" title="Handled another way (call, in person). It comes back if they text again.">Mark replied</button>`;
 function unRender(r, loc) {
   const tile = (k, v) => `<div class="tile"><div class="k">${k}</div><div class="v">${v}</div></div>`;
   if (!r.count) {
-    $('unOut').innerHTML = note('ok', 'check', `<b>Nobody is waiting.</b> Every conversation in this window ends with a reply from your team.${r.optOuts ? ` (${r.optOuts} opt-out ${r.optOuts === 1 ? 'reply' : 'replies'} left out.)` : ''}`);
+    const lo = leftOut(r);
+    $('unOut').innerHTML = note('ok', 'check', `<b>Nobody is waiting.</b> Every conversation in this window ends with a reply from your team.${lo ? ` (Left out: ${esc(lo)}.)` : ''}`);
     return;
   }
   const d = new Date(); const tag = `needs-reply-${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-  $('unOut').innerHTML = `<div class="tiles">${tile('Waiting on a reply', r.count.toLocaleString())}${tile('Longest wait', esc(waitFor(r.oldest)))}${tile('Opt-outs left out', (r.optOuts || 0).toLocaleString())}</div>
+  $('unOut').innerHTML = `<div class="tiles">${tile('Waiting on a reply', r.count.toLocaleString())}${tile('Longest wait', esc(waitFor(r.oldest)))}<div class="tile"><div class="k">Left out</div><div class="v">${((r.optOuts || 0) + (r.dnd || 0) + (r.handled || 0)).toLocaleString()}</div><div class="sec" style="font-size:12px">${esc(leftOut(r) || 'Opt-outs, DND and marked replied')}</div></div></div>
     <div class="gh">Tag them<span class="end" style="font-weight:400"></span></div>
     <div class="grp"><div class="fr"><div class="lbl">Tag to add<small>So you can filter them in GHL or hand them to a rep</small></div><div class="ctl"><input id="unTag" type="text" value="${esc(tag)}" autocomplete="off" spellcheck="false"></div></div></div>
     <div class="btnrow" style="margin-top:8px"><button class="btn lg" id="unTagBtn">Tag ${r.count.toLocaleString()} contact${r.count === 1 ? '' : 's'}</button><a class="btn tinted lg" href="/api/unanswered/${encodeURIComponent(un.id)}/contacts.csv">Export CSV</a><span class="status" id="unTagStatus" style="margin:0"></span></div>
     <div class="gh">Waiting longest first${r.count > r.rows.length ? ` · showing ${r.rows.length} of ${r.count.toLocaleString()}` : ''}</div>
-    <div class="grp people" id="unList">${r.rows.map((x) => `<div class="li un${x.answered ? ' done' : ''}" data-cv="${esc(x.conversationId)}">${RGS.avatarHtml(x.name || x.phone || '?', 'sm round')}<div class="main"><b class="nm" data-open="${esc(x.conversationId)}" title="See the full conversation">${esc(x.name || x.phone || x.email || 'Unknown')}</b><span class="sub">${x.type !== 'sms' && x.body ? esc(x.type.replace(/^./, (ch) => ch.toUpperCase())) + ' · ' : ''}<span class="msg">${esc(x.body || ({ call: 'Incoming call', email: 'Email', sms: 'Text' }[x.type] || x.type.replace(/^./, (ch) => ch.toUpperCase())))}</span></span></div><span class="end"><span class="ts" title="${esc(fmtWhen(x.ts))}">${esc(waitFor(x.ts))}</span>${x.answered ? '<span class="pill ok">Replied</span>' : x.phone ? `<button class="btn sm tinted" data-reply="${esc(x.conversationId)}">Reply</button>` : ''}<a class="icon-btn" href="${convoUrl(loc, x.conversationId)}" target="_blank" rel="noopener" title="Open the conversation in GHL" style="color:var(--blue)">${I('external')}</a></span></div>`).join('')}</div>`;
-  un.rows = r.rows; un.count = r.count;
+    <div class="grp people" id="unList">${r.rows.map((x) => `<div class="li un${x.answered ? ' done' : ''}" data-cv="${esc(x.conversationId)}">${RGS.avatarHtml(x.name || x.phone || '?', 'sm round')}<div class="main"><b class="nm" data-open="${esc(x.conversationId)}" title="See the full conversation">${esc(x.name || x.phone || x.email || 'Unknown')}</b><span class="sub">${x.type !== 'sms' && x.body ? esc(x.type.replace(/^./, (ch) => ch.toUpperCase())) + ' · ' : ''}<span class="msg">${esc(x.body || ({ call: 'Incoming call', email: 'Email', sms: 'Text' }[x.type] || x.type.replace(/^./, (ch) => ch.toUpperCase())))}</span></span></div><span class="end"><span class="ts" title="${esc(fmtWhen(x.ts))}">${esc(waitFor(x.ts))}</span><span class="re">${rowEnd(x)}</span><a class="icon-btn" href="${convoUrl(loc, x.conversationId)}" target="_blank" rel="noopener" title="Open the conversation in GHL" style="color:var(--blue)">${I('external')}</a></span></div>`).join('')}</div>`;
+  un.rows = r.rows; un.count = r.count; un.loc = loc;
   $('unTagBtn').onclick = () => unTag(r.count);
 }
 async function unTag(total) {
@@ -1025,6 +1032,7 @@ async function openConvo(cid) {
   $('cvThread').innerHTML = '<div class="sys"><span class="spin"></span> Loading the conversation…</div>';
   $('cvErr').hidden = true; $('cvComposer').innerHTML = ''; $('cvOpps').hidden = true;
   $('cvSheet').classList.add('open');
+  cvMarkBtn(row);
   try {
     const d = await api(`/api/unanswered/${encodeURIComponent(un.id)}/conversation/${encodeURIComponent(cid)}`);
     if (seq !== cvSeq) return;
@@ -1101,14 +1109,35 @@ $('cvSheet').addEventListener('click', (e) => { if (e.target === $('cvSheet')) c
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && $('cvSheet').classList.contains('open')) closeConvo(); });
 document.addEventListener('click', (e) => { const n = e.target.closest('[data-open]'); if (n) openConvo(n.dataset.open); });
 // Mark a row replied in the list (shared by inline reply and the conversation sheet).
-function markReplied(cid) {
+function markReplied(cid, kind) {
+  const row = (un.rows || []).find((x) => x.conversationId === cid); if (!row) return;
+  if (kind === 'undo') row.answered = null;
+  else if (kind === 'handled') { if (!row.answered) row.answered = 'handled'; }
+  else row.answered = Date.now();
   const li = document.querySelector(`.li.un[data-cv="${CSS.escape(cid)}"]`);
-  const row = (un.rows || []).find((x) => x.conversationId === cid);
-  if (row && !row.answered) row.answered = Date.now(); else if (!row) return;
-  if (li) { li.classList.add('done'); li.querySelector('.rbox')?.remove(); li.querySelector('[data-reply]')?.replaceWith(Object.assign(document.createElement('span'), { className: 'pill ok', textContent: 'Replied' })); }
+  if (li) { li.classList.toggle('done', !!row.answered); li.querySelector('.rbox')?.remove(); li.querySelector('.rerr')?.remove(); const re = li.querySelector('.re'); if (re) re.innerHTML = rowEnd(row); }
   const left = (un.count || 0) - (un.rows || []).filter((x) => x.answered).length;
   const v = document.querySelector('#unOut .tile .v'); if (v) v.textContent = Math.max(0, left).toLocaleString();
   const tb = $('unTagBtn'); if (tb) tb.textContent = `Tag ${Math.max(0, left).toLocaleString()} contact${left === 1 ? '' : 's'}`;
+  if (cvCid === cid) cvMarkBtn(row);
+}
+async function setHandled(cid, undo) {
+  try {
+    await post(`/api/unanswered/${encodeURIComponent(un.id)}/handled`, { conversationId: cid, undo: !!undo });
+    markReplied(cid, undo ? 'undo' : 'handled');
+    RGS.toast(undo ? 'Back on the list' : 'Marked as replied. It comes back if they text again.');
+  } catch (e) { RGS.toast(e.message, { error: true }); }
+}
+document.addEventListener('click', (e) => {
+  const m = e.target.closest('[data-mark]'); if (m) return setHandled(m.dataset.mark, false);
+  const u = e.target.closest('[data-unmark]'); if (u) return setHandled(u.dataset.unmark, true);
+});
+function cvMarkBtn(row) {
+  const b = $('cvMark'); if (!b || !row) return;
+  b.hidden = false;
+  b.textContent = row.answered === 'handled' ? 'Undo mark' : row.answered ? 'Replied' : 'Mark replied';
+  b.disabled = !!row.answered && row.answered !== 'handled';
+  b.onclick = () => setHandled(row.conversationId, row.answered === 'handled');
 }
 document.addEventListener('click', (e) => {
   const b = e.target.closest('[data-reply]'); if (!b) return;

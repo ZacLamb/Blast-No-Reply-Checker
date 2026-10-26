@@ -309,7 +309,32 @@ async function runUnanswered(job, { token, locationId, days, channel, minWaitMin
         if (fresh === 0) { if (cursor === oldest) break; cursor = oldest; } else { cursor = oldest + 1; }
       }
     }
-    job.items = [...byContact.values()].sort((a, b) => a.ts - b.ts); // longest wait first
+    let items = [...byContact.values()];
+    // Conversations someone marked replied stay hidden until the contact sends something newer.
+    try {
+      const handled = await store.handledMap(job.owner, locationId);
+      job.handled = 0;
+      items = items.filter((it) => { const h = handled.get(it.conversationId); if (h && h >= it.ts) { job.handled++; return false; } return true; });
+    } catch (e) { console.error('handled lookup failed:', e.message); }
+    // Do Not Disturb contacts can't be texted back, so they don't belong on the list.
+    job.phase = 'dnd'; job.dndChecked = 0; job.dnd = 0; job.dndTotal = items.length;
+    const keep = new Array(items.length).fill(true);
+    let next = 0;
+    const worker = async () => {
+      for (;;) {
+        const i = next++; if (i >= items.length) return;
+        try {
+          const d = await ghl(token, 'GET', `/contacts/${encodeURIComponent(items[i].contactId)}`, CONTACTS_VERSION);
+          const ct = d.contact || {};
+          const sms = ct.dndSettings?.SMS?.status;
+          if (ct.dnd === true || sms === 'active' || sms === 'permanent') { keep[i] = false; job.dnd++; }
+        } catch (err) { if (err.status === 401 || err.status === 403) throw err; /* unreadable contact: keep it */ }
+        job.dndChecked++;
+      }
+    };
+    await Promise.all(Array.from({ length: 6 }, worker));
+    items = items.filter((_, i) => keep[i]);
+    job.items = items.sort((a, b) => a.ts - b.ts); // longest wait first
     job.status = 'done';
   } catch (err) {
     job.status = 'error';
@@ -351,7 +376,11 @@ if (process.env.DATABASE_URL) {
     kind: 'postgres',
     async init() {
       await pool.query('CREATE TABLE IF NOT EXISTS schedules (location_id TEXT PRIMARY KEY, data JSONB NOT NULL, updated_at TIMESTAMPTZ NOT NULL DEFAULT now())');
+      await pool.query('CREATE TABLE IF NOT EXISTS handled (owner TEXT NOT NULL, location_id TEXT NOT NULL, conversation_id TEXT NOT NULL, last_ts BIGINT NOT NULL, marked_at TIMESTAMPTZ NOT NULL DEFAULT now(), PRIMARY KEY (owner, location_id, conversation_id))');
     },
+    async handledMap(owner, loc) { const r = await pool.query('SELECT conversation_id, last_ts FROM handled WHERE owner=$1 AND location_id=$2', [String(owner), loc]); return new Map(r.rows.map((x) => [x.conversation_id, Number(x.last_ts)])); },
+    async handledPut(owner, loc, cid, ts) { await pool.query('INSERT INTO handled (owner, location_id, conversation_id, last_ts) VALUES ($1,$2,$3,$4) ON CONFLICT (owner, location_id, conversation_id) DO UPDATE SET last_ts=EXCLUDED.last_ts, marked_at=now()', [String(owner), loc, cid, ts]); },
+    async handledDel(owner, loc, cid) { await pool.query('DELETE FROM handled WHERE owner=$1 AND location_id=$2 AND conversation_id=$3', [String(owner), loc, cid]); },
     async all() { return (await pool.query('SELECT data FROM schedules')).rows.map((r) => r.data); },
     async get(key) { const r = await pool.query('SELECT data FROM schedules WHERE location_id = $1', [key]); return r.rows[0]?.data || null; },
     async put(sched) { await pool.query('INSERT INTO schedules (location_id, data, updated_at) VALUES ($1, $2, now()) ON CONFLICT (location_id) DO UPDATE SET data = EXCLUDED.data, updated_at = now()', [sched.key, sched]); },
@@ -362,9 +391,17 @@ if (process.env.DATABASE_URL) {
   let cache = null;
   const load = () => { if (cache) return cache; try { cache = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { cache = {}; } return cache; };
   const save = () => { fs.mkdirSync(DATA_DIR, { recursive: true }); const tmp = file + '.tmp'; fs.writeFileSync(tmp, JSON.stringify(cache, null, 2)); fs.renameSync(tmp, file); };
+  const hfile = path.join(DATA_DIR, 'handled.json');
+  let hcache = null;
+  const hload = () => { if (hcache) return hcache; try { hcache = JSON.parse(fs.readFileSync(hfile, 'utf8')); } catch { hcache = {}; } return hcache; };
+  const hsave = () => { fs.mkdirSync(DATA_DIR, { recursive: true }); const tmp = hfile + '.tmp'; fs.writeFileSync(tmp, JSON.stringify(hcache)); fs.renameSync(tmp, hfile); };
+  const hkey = (owner, loc) => `${owner}:${loc}`;
   store = {
     kind: 'file',
     async init() { load(); },
+    async handledMap(owner, loc) { return new Map(Object.entries(hload()[hkey(owner, loc)] || {})); },
+    async handledPut(owner, loc, cid, ts) { const h = hload(); (h[hkey(owner, loc)] ||= {})[cid] = ts; hsave(); },
+    async handledDel(owner, loc, cid) { const h = hload(); if (h[hkey(owner, loc)]) { delete h[hkey(owner, loc)][cid]; hsave(); } },
     async all() { return Object.values(load()); },
     async get(key) { return load()[key] || null; },
     async put(sched) { load()[sched.key] = sched; save(); },
@@ -661,10 +698,12 @@ app.post('/api/unanswered', wrap(async (req, res) => {
 app.get('/api/unanswered/:id', (req, res) => {
   const job = ownedJob(unansweredJobs, req, res, 'Check');
   if (!job) return;
-  const out = { status: job.status, scanned: job.scanned, error: job.error || null, locationId: job.locationId };
+  const out = { status: job.status, scanned: job.scanned, error: job.error || null, locationId: job.locationId, phase: job.phase || 'scan', dndChecked: job.dndChecked || 0, dndTotal: job.dndTotal || 0 };
   if (job.status === 'done') {
     out.count = job.items.length;
     out.optOuts = job.optOuts || 0;
+    out.dnd = job.dnd || 0;
+    out.handled = job.handled || 0;
     out.oldest = job.items[0]?.ts || null;
     out.rows = job.items.slice(0, 300).map(({ conversationId, contactId, name, phone, email, body, type, ts, unread, answered }) => ({ conversationId, contactId, name, phone, email, body, type, ts, unread, answered: answered || null }));
   }
@@ -804,6 +843,18 @@ app.post('/api/unanswered/:id/opps', wrap(async (req, res) => {
     const d = await ghl(c.token, 'POST', '/opportunities/', CONTACTS_VERSION, body);
     res.json({ ok: true, opportunity: slimOpp(d.opportunity || d) });
   } catch (err) { const e = oppErr(err); res.status(e.status).json({ error: e.error }); }
+}));
+
+// Mark a waiting conversation as handled without texting (answered by phone, in person, elsewhere).
+// It stays off the list until the contact sends something newer. undo: true puts it back.
+app.post('/api/unanswered/:id/handled', wrap(async (req, res) => {
+  const job = ownedJob(unansweredJobs, req, res, 'Check');
+  if (!job) return;
+  const it = job.items.find((x) => x.conversationId === String(req.body.conversationId || ''));
+  if (!it) return res.status(404).json({ error: 'That conversation is not in this check. Run it again.' });
+  if (req.body.undo) { await store.handledDel(job.owner, job.locationId, it.conversationId); if (it.answered === 'handled') it.answered = null; }
+  else { await store.handledPut(job.owner, job.locationId, it.conversationId, it.ts); if (!it.answered) it.answered = 'handled'; }
+  res.json({ ok: true });
 }));
 
 // Reply by text from the dashboard. Needs the conversations/message.write scope: a
