@@ -934,7 +934,7 @@ async function unRun() {
   $('unRun').disabled = true; $('unStatus').innerHTML = '<span class="spin"></span> Reading conversations…';
   $('unOut').innerHTML = '';
   try {
-    const { id } = await post('/api/unanswered', { locationId: c.locationId, days: Number($('unDays').value), channel: $('unChannel').value, minWait: Number($('unWait').value) });
+    const { id } = await post('/api/unanswered', { locationId: c.locationId, days: Number($('unDays').value), channel: $('unChannel').value, minWait: Number($('unWait').value), sort: un.sort });
     un.id = id;
     let r;
     for (;;) {
@@ -942,16 +942,49 @@ async function unRun() {
       if (seq !== un.seq) return;
       r = await api(`/api/unanswered/${id}?sort=${un.sort}`);
       if (r.status !== 'running') break;
-      $('unStatus').innerHTML = r.phase === 'dnd' ? `<span class="spin"></span> Checking Do Not Disturb… ${r.dndChecked} of ${r.dndTotal}` : `<span class="spin"></span> Reading conversations… ${r.scanned} waiting so far`;
+      $('unStatus').innerHTML = `<span class="spin"></span> Reading conversations… ${r.scanned} waiting so far`;
     }
     if (r.status === 'error') throw new Error(r.error || 'The check failed');
     $('unStatus').textContent = '';
+    un.dndGone = new Set();
     unRender(r, c.locationId);
+    if (!r.dndDone) unDndWatch(seq);
   } catch (e) {
     if (seq !== un.seq) return;
     $('unStatus').textContent = '';
     $('unOut').innerHTML = note('bad', 'alert', esc(e.message));
   } finally { if (seq === un.seq) $('unRun').disabled = false; }
+}
+// The list shows right away; Do Not Disturb contacts drop off as the background check finds them.
+async function unDndWatch(seq) {
+  for (;;) {
+    let r;
+    try { r = await api(`/api/unanswered/${encodeURIComponent(un.id)}?sort=${un.sort}`); } catch (e) { return; }
+    if (seq !== un.seq) return;
+    for (const cid of r.dndIds || []) {
+      if (un.dndGone.has(cid)) continue;
+      un.dndGone.add(cid);
+      const i = (un.rows || []).findIndex((x) => x.conversationId === cid);
+      if (i >= 0) un.rows.splice(i, 1);
+      un.count = Math.max(0, (un.count || 0) - 1);
+      document.querySelector(`.li.un[data-cv="${CSS.escape(cid)}"]`)?.remove();
+      if (cvCid === cid) closeConvo();
+    }
+    if (un.last) { un.last.dnd = r.dnd; un.last.count = un.count; }
+    const lt = document.querySelectorAll('#unOut .tile')[2];
+    if (lt && un.last) { lt.querySelector('.v').textContent = ((un.last.optOuts || 0) + (r.dnd || 0) + (un.last.handled || 0)).toLocaleString(); lt.querySelector('.sec').textContent = leftOut(un.last) || 'Opt-outs, DND and marked replied'; }
+    const left = (un.count || 0) - (un.rows || []).filter((x) => x.answered).length;
+    const v = document.querySelector('#unOut .tile .v'); if (v) v.textContent = Math.max(0, left).toLocaleString();
+    const ht = $('unHeadTxt'); if (ht) ht.textContent = un.count > (un.rows || []).length ? `Showing ${un.rows.length} of ${un.count.toLocaleString()}` : `${Math.max(0, left).toLocaleString()} waiting`;
+    const tb = $('unTagBtn'); if (tb) { tb.textContent = `Tag ${Math.max(0, left).toLocaleString()} contact${left === 1 ? '' : 's'}`; tb.disabled = !r.dndDone; }
+    if (r.dndDone || r.dndError) {
+      $('unStatus').textContent = r.dndError ? 'Could not check Do Not Disturb: ' + r.dndError : (r.dnd ? `Done. ${r.dnd} on Do Not Disturb left out.` : '');
+      if (!un.count) unRender(r, un.loc);
+      return;
+    }
+    $('unStatus').innerHTML = `<span class="spin"></span> Checking Do Not Disturb in the background… ${r.dndChecked} of ${r.dndTotal}. You can start replying.`;
+    await sleep(1500);
+  }
 }
 const leftOut = (r) => [r.optOuts ? `${r.optOuts} opt-out` : '', r.dnd ? `${r.dnd} DND` : '', r.handled ? `${r.handled} marked replied` : ''].filter(Boolean).join(' · ');
 const rowEnd = (x) => x.answered === 'handled'
@@ -970,12 +1003,13 @@ function unRender(r, loc) {
     <div class="gh">Tag them<span class="end" style="font-weight:400"></span></div>
     <div class="grp"><div class="fr"><div class="lbl">Tag to add<small>So you can filter them in GHL or hand them to a rep</small></div><div class="ctl"><input id="unTag" type="text" value="${esc(tag)}" autocomplete="off" spellcheck="false"></div></div></div>
     <div class="btnrow" style="margin-top:8px"><button class="btn lg" id="unTagBtn">Tag ${Math.max(0, r.count - r.rows.filter((x) => x.answered).length).toLocaleString()} contacts</button><a class="btn tinted lg" href="/api/unanswered/${encodeURIComponent(un.id)}/contacts.csv">Export CSV</a><span class="status" id="unTagStatus" style="margin:0"></span></div>
-    <div class="gh">${r.count > r.rows.length ? `Showing ${r.rows.length} of ${r.count.toLocaleString()}` : `${Math.max(0, r.count - r.rows.filter((x) => x.answered).length).toLocaleString()} waiting`}<span class="end"><span class="seg mini" id="unSort"><button data-s="oldest" class="${un.sort === 'oldest' ? 'on' : ''}">Longest wait first</button><button data-s="newest" class="${un.sort === 'newest' ? 'on' : ''}">Newest first</button></span></span></div>
+    <div class="gh"><span id="unHeadTxt">${r.count > r.rows.length ? `Showing ${r.rows.length} of ${r.count.toLocaleString()}` : `${Math.max(0, r.count - r.rows.filter((x) => x.answered).length).toLocaleString()} waiting`}</span><span class="end"><span class="seg mini" id="unSort"><button data-s="oldest" class="${un.sort === 'oldest' ? 'on' : ''}">Longest wait first</button><button data-s="newest" class="${un.sort === 'newest' ? 'on' : ''}">Newest first</button></span></span></div>
     <div class="grp people" id="unList">${r.rows.map((x) => `<div class="li un${x.answered ? ' done' : ''}" data-cv="${esc(x.conversationId)}">${RGS.avatarHtml(x.name || x.phone || '?', 'sm round')}<div class="main"><b class="nm" data-open="${esc(x.conversationId)}" title="See the full conversation">${esc(x.name || x.phone || x.email || 'Unknown')}</b><span class="sub">${x.type !== 'sms' && x.body ? esc(x.type.replace(/^./, (ch) => ch.toUpperCase())) + ' · ' : ''}<span class="msg">${esc(x.body || ({ call: 'Incoming call', email: 'Email', sms: 'Text' }[x.type] || x.type.replace(/^./, (ch) => ch.toUpperCase())))}</span></span></div><span class="end"><span class="ts" title="${esc(fmtWhen(x.ts))}">${esc(waitFor(x.ts))}</span><span class="re">${rowEnd(x)}</span><a class="icon-btn" href="${convoUrl(loc, x.conversationId)}" target="_blank" rel="noopener" title="Open the conversation in GHL" style="color:var(--blue)">${I('external')}</a></span></div>`).join('')}</div>`;
   un.rows = r.rows; un.count = r.count; un.loc = loc; un.last = r;
   $('unSort').onclick = (e) => { const b = e.target.closest('button[data-s]'); if (b && b.dataset.s !== un.sort) unResort(b.dataset.s); };
   const csv = document.querySelector('#unOut a[href*="contacts.csv"]'); if (csv) csv.href = `/api/unanswered/${encodeURIComponent(un.id)}/contacts.csv?sort=${un.sort}`;
   $('unTagBtn').onclick = () => unTag(r.count);
+  if (!r.dndDone) { $('unTagBtn').disabled = true; $('unTagBtn').title = 'Available once the Do Not Disturb check finishes'; }
 }
 async function unTag(total) {
   if (un.tagging) return;
