@@ -34,6 +34,15 @@ never tagged, even though their conversation ends on an outbound text.
 
 No webhooks and no workflow changes.
 
+## Unanswered replies
+
+The **Unanswered replies** tab lists every contact whose conversation ends on *their*
+message: they texted (or, with "all channels", called, emailed or chatted) and nobody in
+the sub-account has answered since. Longest wait first, with a link to each conversation,
+a CSV export and an optional tag (`needs-reply-YYYY-MM-DD`) so you can filter them in GHL.
+Replies that are just an opt-out word (STOP, unsubscribe…) are left out. "Waiting at least"
+skips replies that only just came in.
+
 ## Deploy (Railway)
 
 Env vars: `HUB_URL`, `HUB_JWT_SECRET`, `HUB_SERVICE_KEY` (same values as the hub). Optional:

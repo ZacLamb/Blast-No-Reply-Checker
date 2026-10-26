@@ -114,6 +114,7 @@
   <div class="toolbar-top">
     <div class="seg" id="modes">
       <button class="on" data-mode="finder" id="tabFinder">No-reply finder</button>
+      <button data-mode="unanswered" id="tabUnanswered">Unanswered replies</button>
       <button data-mode="auto" id="tabAuto">Automatic</button>
       <button data-mode="campaign" id="tabCampaign" hidden>Offer campaign</button>
     </div>
@@ -176,6 +177,20 @@
         <button class="btn tinted lg" id="csvBtn">Export CSV</button>
         <button class="btn lg" id="tagBtn">Tag contacts</button>
       </div>
+    </div>
+  </div>
+
+  <!-- ============ Unanswered replies ============ -->
+  <div class="pane" id="unPane" hidden>
+    <div class="inner">
+      <div class="page-head"><div><h1>Unanswered replies</h1><p>Everyone whose conversation ends on their message: they texted back and nobody in the sub-account has answered yet. Longest wait first.</p></div></div>
+      <div class="grp">
+        <div class="fr"><div class="lbl">Look back</div><div class="ctl"><select id="unDays"><option value="1">Last 24 hours</option><option value="3">Last 3 days</option><option value="7" selected>Last 7 days</option><option value="14">Last 14 days</option><option value="30">Last 30 days</option></select></div></div>
+        <div class="fr"><div class="lbl">Channel</div><div class="ctl"><select id="unChannel"><option value="sms" selected>Texts only</option><option value="all">Texts, calls, email and chat</option></select></div></div>
+        <div class="fr"><div class="lbl">Waiting at least<small>Skip replies that just came in</small></div><div class="ctl"><select id="unWait"><option value="0">Any time</option><option value="15" selected>15 minutes</option><option value="60">1 hour</option><option value="240">4 hours</option><option value="1440">1 day</option></select></div></div>
+      </div>
+      <div class="btnrow"><button class="btn lg" id="unRun">Check now</button><span class="status" id="unStatus" style="margin:0"></span></div>
+      <div id="unOut"></div>
     </div>
   </div>
 
@@ -594,7 +609,7 @@ let mode = 'finder';
 function showTab(name) {
   mode = name;
   $('modes').querySelectorAll('button').forEach((x) => x.classList.toggle('on', x.dataset.mode === name));
-  $('mx').hidden = name !== 'finder'; $('autoPane').hidden = name !== 'auto'; $('campaignTab').hidden = name !== 'campaign';
+  $('mx').hidden = name !== 'finder'; $('autoPane').hidden = name !== 'auto'; $('unPane').hidden = name !== 'unanswered'; $('campaignTab').hidden = name !== 'campaign';
   ['days', 'detectBtn', 'scanBtn'].forEach((id) => { $(id).style.display = name === 'finder' ? '' : 'none'; });
   try { localStorage.setItem('bnrf-tab', name); } catch (e) {}
   if (name === 'campaign' && !cp.loaded) cpLoad();
@@ -843,6 +858,75 @@ $('cpRunNow').onclick = async () => {
   } catch (e) { $('cpRunNow').disabled = false; show($('cpRunError'), e.message); }
 };
 
+// ---------- Unanswered replies ----------
+const un = { id: null, seq: 0, tagging: false };
+const waitFor = (ts) => { const m = Math.max(0, Math.round((Date.now() - ts) / 60000)); if (m < 60) return m + 'm'; const h = Math.floor(m / 60); if (h < 48) return h + 'h' + (m % 60 && h < 10 ? ' ' + (m % 60) + 'm' : ''); return Math.floor(h / 24) + 'd'; };
+const convoUrl = (loc, id) => `https://app.gohighlevel.com/v2/location/${encodeURIComponent(loc)}/conversations/conversations/${encodeURIComponent(id)}`;
+function unReset() {
+  un.seq++; un.id = null; un.tagging = false;
+  $('unStatus').textContent = ''; $('unRun').disabled = false;
+  const l = curLoc();
+  $('unOut').innerHTML = `<div class="empty" style="padding-top:40px">${RGS.glyph('message', '--t-orange')}<b>${l ? 'Check for replies nobody answered' : 'Pick a sub-account first'}</b>${l ? 'Finds everyone in ' + esc(l.label) + ' who is waiting on you.' : 'Choose one in the sidebar.'}</div>`;
+}
+async function unRun() {
+  const c = creds();
+  if (!c.locationId) return RGS.toast('Pick a sub-account first', { error: true });
+  const seq = ++un.seq;
+  $('unRun').disabled = true; $('unStatus').innerHTML = '<span class="spin"></span> Reading conversations…';
+  $('unOut').innerHTML = '';
+  try {
+    const { id } = await post('/api/unanswered', { locationId: c.locationId, days: Number($('unDays').value), channel: $('unChannel').value, minWait: Number($('unWait').value) });
+    un.id = id;
+    let r;
+    for (;;) {
+      await sleep(1200);
+      if (seq !== un.seq) return;
+      r = await api('/api/unanswered/' + id);
+      if (r.status !== 'running') break;
+      $('unStatus').innerHTML = `<span class="spin"></span> Reading conversations… ${r.scanned} waiting so far`;
+    }
+    if (r.status === 'error') throw new Error(r.error || 'The check failed');
+    $('unStatus').textContent = '';
+    unRender(r, c.locationId);
+  } catch (e) {
+    if (seq !== un.seq) return;
+    $('unStatus').textContent = '';
+    $('unOut').innerHTML = note('bad', 'alert', esc(e.message));
+  } finally { if (seq === un.seq) $('unRun').disabled = false; }
+}
+function unRender(r, loc) {
+  const tile = (k, v) => `<div class="tile"><div class="k">${k}</div><div class="v">${v}</div></div>`;
+  if (!r.count) {
+    $('unOut').innerHTML = note('ok', 'check', `<b>Nobody is waiting.</b> Every conversation in this window ends with a reply from your team.${r.optOuts ? ` (${r.optOuts} opt-out ${r.optOuts === 1 ? 'reply' : 'replies'} left out.)` : ''}`);
+    return;
+  }
+  const d = new Date(); const tag = `needs-reply-${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  $('unOut').innerHTML = `<div class="tiles">${tile('Waiting on a reply', r.count.toLocaleString())}${tile('Longest wait', esc(waitFor(r.oldest)))}${tile('Opt-outs left out', (r.optOuts || 0).toLocaleString())}</div>
+    <div class="gh">Tag them<span class="end" style="font-weight:400"></span></div>
+    <div class="grp"><div class="fr"><div class="lbl">Tag to add<small>So you can filter them in GHL or hand them to a rep</small></div><div class="ctl"><input id="unTag" type="text" value="${esc(tag)}" autocomplete="off" spellcheck="false"></div></div></div>
+    <div class="btnrow" style="margin-top:8px"><button class="btn lg" id="unTagBtn">Tag ${r.count.toLocaleString()} contact${r.count === 1 ? '' : 's'}</button><a class="btn tinted lg" href="/api/unanswered/${encodeURIComponent(un.id)}/contacts.csv">Export CSV</a><span class="status" id="unTagStatus" style="margin:0"></span></div>
+    <div class="gh">Waiting longest first${r.count > r.rows.length ? ` · showing ${r.rows.length} of ${r.count.toLocaleString()}` : ''}</div>
+    <div class="grp people">${r.rows.map((x) => `<div class="li">${RGS.avatarHtml(x.name || x.phone || '?', 'sm round')}<div class="main"><b>${esc(x.name || x.phone || x.email || 'Unknown')}</b><span class="sub">${x.type !== 'sms' && x.body ? esc(x.type.replace(/^./, (ch) => ch.toUpperCase())) + ' · ' : ''}<span class="msg">${esc(x.body || ({ call: 'Incoming call', email: 'Email', sms: 'Text' }[x.type] || x.type.replace(/^./, (ch) => ch.toUpperCase())))}</span></span></div><span class="end"><span class="ts" title="${esc(fmtWhen(x.ts))}">${esc(waitFor(x.ts))}</span><a class="icon-btn" href="${convoUrl(loc, x.conversationId)}" target="_blank" rel="noopener" title="Open the conversation in GHL" style="color:var(--blue)">${I('external')}</a></span></div>`).join('')}</div>`;
+  $('unTagBtn').onclick = () => unTag(r.count);
+}
+async function unTag(total) {
+  if (un.tagging) return;
+  const tag = $('unTag').value.trim().toLowerCase();
+  if (!tag) return RGS.toast('Enter a tag name', { error: true });
+  un.tagging = true; $('unTagBtn').disabled = true;
+  try {
+    const { jobId } = await post(`/api/unanswered/${encodeURIComponent(un.id)}/tag`, { tag });
+    let j;
+    for (;;) { await sleep(1000); j = await api('/api/tag/' + jobId); $('unTagStatus').innerHTML = `<span class="spin"></span> Tagged ${j.done} of ${j.total}`; if (j.status !== 'running') break; }
+    if (j.status === 'error') throw new Error(j.error);
+    $('unTagStatus').textContent = `Tagged ${j.done} of ${j.total}${j.failed ? ` · ${j.failed} failed` : ''}`;
+    RGS.toast(`Tagged ${j.done} contact${j.done === 1 ? '' : 's'} "${tag}"`, { error: !j.done });
+  } catch (e) {
+    $('unTagStatus').textContent = ''; RGS.toast(e.message, { error: true });
+  } finally { un.tagging = false; $('unTagBtn').disabled = false; }
+}
+$('unRun').onclick = unRun;
+
 // ---------- boot ----------
 function onLocationChanged() {
   scanSeq++; pickSeq++; scanning = false; $('scanBtn').disabled = false;
@@ -850,6 +934,7 @@ function onLocationChanged() {
   $('search').value = '';
   clearInterval(schedPoll); clearInterval(cp.poll); cp.loaded = false;
   startState();
+  unReset();
   renderSchedule(null, null, false);
   loadSchedule();
   if (mode === 'campaign') cpLoad();
@@ -860,7 +945,7 @@ RGS.ready.then(() => {
   $('dGlyph').innerHTML = I('message'); $('sheetGl').innerHTML = I('filter');
   $('backBtn').innerHTML = I('left') + 'Blasts';
   let saved = 'finder'; try { saved = localStorage.getItem('bnrf-tab') || 'finder'; } catch (e) {}
-  showTab(saved === 'auto' ? 'auto' : 'finder');
+  showTab(['auto', 'unanswered'].includes(saved) ? saved : 'finder');
   RGS.onLocation(onLocationChanged);
   onLocationChanged();
 });
