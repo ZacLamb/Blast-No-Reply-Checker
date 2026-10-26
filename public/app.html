@@ -83,6 +83,26 @@
   .li.un .rerr { flex-basis: 100%; padding: 0 0 8px 44px; color: var(--red); font-size: 12.5px; }
   @media (max-width: 860px) { .li.un .rbox, .li.un .rerr { padding-left: 0; } }
 
+  /* conversation sheet */
+  .li.un .main b.nm { cursor: pointer; } .li.un .main b.nm:hover { color: var(--blue); text-decoration: underline; }
+  #cvSheet .sheet { max-width: 640px; display: flex; flex-direction: column; max-height: calc(100vh - 96px); }
+  #cvSheet .sheet-hd .sub { color: var(--sec); font-size: 12.5px; }
+  #cvSheet .sheet-hd .x { margin-left: auto; }
+  .thread { flex: 1; overflow-y: auto; padding: 12px 18px 16px; min-height: 200px; display: flex; flex-direction: column; gap: 4px; }
+  .thread .day { text-align: center; color: var(--sec); font-size: 11.5px; font-weight: 600; margin: 12px 0 6px; }
+  .thread .m { max-width: 78%; padding: 8px 13px; border-radius: 18px; font-size: 14px; line-height: 1.38; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .thread .m.in { align-self: flex-start; background: var(--grp); border-bottom-left-radius: 6px; }
+  .thread .m.out { align-self: flex-end; background: var(--blue); color: #fff; border-bottom-right-radius: 6px; }
+  .thread .m a { color: inherit; text-decoration: underline; }
+  .thread .meta { font-size: 11px; color: var(--sec); margin: 0 6px 6px; }
+  .thread .meta.in { align-self: flex-start; } .thread .meta.out { align-self: flex-end; }
+  .thread .sys { align-self: center; font-size: 12px; color: var(--sec); background: var(--fill-2); border-radius: 10px; padding: 4px 10px; margin: 4px 0; max-width: 90%; text-align: center; }
+  .thread .m .subj { font-weight: 600; display: block; margin-bottom: 2px; }
+  .composer { display: flex; gap: 8px; align-items: flex-end; padding: 10px 14px; border-top: .5px solid var(--sep); background: var(--grp); }
+  .composer textarea { flex: 1; min-height: 38px; max-height: 140px; resize: vertical; border-radius: 18px; padding: 9px 14px; font: 14px var(--font); }
+  .composer .note-sm { flex: 1; font-size: 12.5px; color: var(--sec); padding: 6px 4px; }
+  .cverr { padding: 0 16px 10px; color: var(--red); font-size: 12.5px; background: var(--grp); }
+
   /* schedule pane */
   .pane { flex: 1; min-height: 0; overflow-y: auto; }
   .pane .inner { max-width: 760px; padding: 22px 28px 60px; }
@@ -306,6 +326,14 @@
       </div>
     </div>
   </div>
+
+  <!-- Conversation sheet (Unanswered replies) -->
+  <div class="sheet-bg" id="cvSheet"><div class="sheet" role="dialog" aria-modal="true">
+    <div class="sheet-hd"><span id="cvAv"></span><div style="min-width:0"><h2 id="cvName"></h2><div class="sub" id="cvSub"></div></div><a class="icon-btn x" id="cvOpen" target="_blank" rel="noopener" title="Open in GHL" style="color:var(--blue)"></a><button class="btn plain" id="cvClose">Done</button></div>
+    <div class="thread" id="cvThread"></div>
+    <div id="cvErr" class="cverr" hidden></div>
+    <div class="composer" id="cvComposer"></div>
+  </div></div>
 
   <!-- Detection settings sheet -->
   <div class="sheet-bg" id="sheet"><div class="sheet">
@@ -914,7 +942,7 @@ function unRender(r, loc) {
     <div class="grp"><div class="fr"><div class="lbl">Tag to add<small>So you can filter them in GHL or hand them to a rep</small></div><div class="ctl"><input id="unTag" type="text" value="${esc(tag)}" autocomplete="off" spellcheck="false"></div></div></div>
     <div class="btnrow" style="margin-top:8px"><button class="btn lg" id="unTagBtn">Tag ${r.count.toLocaleString()} contact${r.count === 1 ? '' : 's'}</button><a class="btn tinted lg" href="/api/unanswered/${encodeURIComponent(un.id)}/contacts.csv">Export CSV</a><span class="status" id="unTagStatus" style="margin:0"></span></div>
     <div class="gh">Waiting longest first${r.count > r.rows.length ? ` · showing ${r.rows.length} of ${r.count.toLocaleString()}` : ''}</div>
-    <div class="grp people" id="unList">${r.rows.map((x) => `<div class="li un${x.answered ? ' done' : ''}" data-cv="${esc(x.conversationId)}">${RGS.avatarHtml(x.name || x.phone || '?', 'sm round')}<div class="main"><b>${esc(x.name || x.phone || x.email || 'Unknown')}</b><span class="sub">${x.type !== 'sms' && x.body ? esc(x.type.replace(/^./, (ch) => ch.toUpperCase())) + ' · ' : ''}<span class="msg">${esc(x.body || ({ call: 'Incoming call', email: 'Email', sms: 'Text' }[x.type] || x.type.replace(/^./, (ch) => ch.toUpperCase())))}</span></span></div><span class="end"><span class="ts" title="${esc(fmtWhen(x.ts))}">${esc(waitFor(x.ts))}</span>${x.answered ? '<span class="pill ok">Replied</span>' : x.phone ? `<button class="btn sm tinted" data-reply="${esc(x.conversationId)}">Reply</button>` : ''}<a class="icon-btn" href="${convoUrl(loc, x.conversationId)}" target="_blank" rel="noopener" title="Open the conversation in GHL" style="color:var(--blue)">${I('external')}</a></span></div>`).join('')}</div>`;
+    <div class="grp people" id="unList">${r.rows.map((x) => `<div class="li un${x.answered ? ' done' : ''}" data-cv="${esc(x.conversationId)}">${RGS.avatarHtml(x.name || x.phone || '?', 'sm round')}<div class="main"><b class="nm" data-open="${esc(x.conversationId)}" title="See the full conversation">${esc(x.name || x.phone || x.email || 'Unknown')}</b><span class="sub">${x.type !== 'sms' && x.body ? esc(x.type.replace(/^./, (ch) => ch.toUpperCase())) + ' · ' : ''}<span class="msg">${esc(x.body || ({ call: 'Incoming call', email: 'Email', sms: 'Text' }[x.type] || x.type.replace(/^./, (ch) => ch.toUpperCase())))}</span></span></div><span class="end"><span class="ts" title="${esc(fmtWhen(x.ts))}">${esc(waitFor(x.ts))}</span>${x.answered ? '<span class="pill ok">Replied</span>' : x.phone ? `<button class="btn sm tinted" data-reply="${esc(x.conversationId)}">Reply</button>` : ''}<a class="icon-btn" href="${convoUrl(loc, x.conversationId)}" target="_blank" rel="noopener" title="Open the conversation in GHL" style="color:var(--blue)">${I('external')}</a></span></div>`).join('')}</div>`;
   un.rows = r.rows; un.count = r.count;
   $('unTagBtn').onclick = () => unTag(r.count);
 }
@@ -935,6 +963,80 @@ async function unTag(total) {
   } finally { un.tagging = false; $('unTagBtn').disabled = false; }
 }
 $('unRun').onclick = unRun;
+
+// ---- full conversation (click a name) ----
+let cvCid = null, cvSeq = 0;
+const dayLabel = (d) => { const t = new Date(d), n = new Date(); if (t.toDateString() === n.toDateString()) return 'Today'; const y = new Date(n); y.setDate(n.getDate() - 1); if (t.toDateString() === y.toDateString()) return 'Yesterday'; return t.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric', year: t.getFullYear() === n.getFullYear() ? undefined : 'numeric' }); };
+const linkify = (t) => esc(t).replace(/(https?:\/\/[^\s<]+)/g, '<a href="$1" target="_blank" rel="noopener">$1</a>');
+function msgHtml(m) {
+  const dir = m.direction === 'outbound' ? 'out' : 'in';
+  const time = m.at ? fmtTime(m.at) : '';
+  if (m.type.startsWith('activity') || m.type === 'internal_comments') return `<div class="sys">${esc(m.body || m.type.replace(/_/g, ' '))}${time ? ' · ' + esc(time) : ''}</div>`;
+  if (m.type === 'call' || m.type === 'ivr_call') {
+    const secs = m.callSeconds ? ` · ${Math.floor(m.callSeconds / 60)}:${String(m.callSeconds % 60).padStart(2, '0')}` : '';
+    const st = m.callStatus ? ` (${m.callStatus.replace(/[-_]/g, ' ')})` : '';
+    return `<div class="sys">${dir === 'in' ? 'Incoming' : 'Outgoing'} call${esc(st)}${secs}${time ? ' · ' + esc(time) : ''}</div>`;
+  }
+  const att = (m.attachments || []).map((u) => /\.(png|jpe?g|gif|webp)(\?|$)/i.test(u) ? `<a href="${esc(u)}" target="_blank" rel="noopener"><img src="${esc(u)}" alt="" style="max-width:220px;max-height:220px;border-radius:12px;display:block;margin-top:6px"></a>` : `<div><a href="${esc(u)}" target="_blank" rel="noopener">Attachment</a></div>`).join('');
+  const label = m.type !== 'sms' && m.type ? `${m.type.replace(/_/g, ' ')} · ` : '';
+  return `<div class="m ${dir}">${m.subject ? `<span class="subj">${esc(m.subject)}</span>` : ''}${linkify(m.body) || (att ? '' : '<i>(empty)</i>')}${att}</div><div class="meta ${dir}">${esc(label)}${esc(time)}${dir === 'out' && m.status && !/delivered|read|sent/i.test(m.status) ? ' · ' + esc(m.status) : ''}</div>`;
+}
+function cvThread(messages) {
+  let last = '';
+  return messages.map((m) => { const d = m.at ? new Date(m.at).toDateString() : ''; const h = d && d !== last ? `<div class="day">${esc(dayLabel(m.at))}</div>` : ''; last = d || last; return h + msgHtml(m); }).join('') || '<div class="sys">No messages found.</div>';
+}
+function cvComposer(c) {
+  const el = $('cvComposer');
+  if (!c.phone) { el.innerHTML = '<div class="note-sm">No phone number on this contact. Reply in GHL with the link at the top.</div>'; return; }
+  el.innerHTML = `<textarea id="cvText" rows="1" maxlength="1600" placeholder="Text ${esc((c.name || 'them').split(' ')[0])}"></textarea><button class="btn" id="cvSend">Send</button>`;
+  $('cvText').addEventListener('keydown', (ev) => { if (ev.key === 'Enter' && (ev.metaKey || ev.ctrlKey)) { ev.preventDefault(); $('cvSend').click(); } });
+  $('cvSend').onclick = async () => {
+    const message = $('cvText').value.trim(); if (!message) return $('cvText').focus();
+    $('cvSend').disabled = true; $('cvText').disabled = true; $('cvSend').textContent = 'Sending…'; $('cvErr').hidden = true;
+    try {
+      await post(`/api/unanswered/${encodeURIComponent(un.id)}/reply`, { conversationId: c.conversationId, message });
+      $('cvThread').insertAdjacentHTML('beforeend', msgHtml({ direction: 'outbound', type: 'sms', body: message, at: new Date().toISOString() }));
+      $('cvThread').scrollTop = $('cvThread').scrollHeight;
+      $('cvText').value = ''; markReplied(c.conversationId); RGS.toast('Reply sent');
+    } catch (e) { $('cvErr').textContent = e.message; $('cvErr').hidden = false; }
+    finally { if ($('cvSend')) { $('cvSend').disabled = false; $('cvText').disabled = false; $('cvSend').textContent = 'Send'; } }
+  };
+}
+async function openConvo(cid) {
+  const row = (un.rows || []).find((x) => x.conversationId === cid); if (!row) return;
+  const seq = ++cvSeq; cvCid = cid;
+  $('cvAv').innerHTML = RGS.avatarHtml(row.name || row.phone || '?', 'round');
+  $('cvName').textContent = row.name || row.phone || row.email || 'Unknown';
+  $('cvSub').textContent = [row.phone, row.email].filter(Boolean).join(' · ');
+  $('cvOpen').innerHTML = I('external'); $('cvOpen').href = convoUrl(curLoc()?.locationId || '', cid);
+  $('cvThread').innerHTML = '<div class="sys"><span class="spin"></span> Loading the conversation…</div>';
+  $('cvErr').hidden = true; $('cvComposer').innerHTML = '';
+  $('cvSheet').classList.add('open');
+  try {
+    const d = await api(`/api/unanswered/${encodeURIComponent(un.id)}/conversation/${encodeURIComponent(cid)}`);
+    if (seq !== cvSeq) return;
+    $('cvOpen').href = convoUrl(d.locationId, cid);
+    $('cvThread').innerHTML = (d.more ? '<div class="sys">Showing the latest 300 messages. Open in GHL for older ones.</div>' : '') + cvThread(d.messages);
+    $('cvThread').scrollTop = $('cvThread').scrollHeight;
+    cvComposer(d.contact);
+    setTimeout(() => $('cvText')?.focus(), 0);
+  } catch (e) { if (seq === cvSeq) $('cvThread').innerHTML = `<div class="sys" style="color:var(--red)">${esc(e.message)}</div>`; }
+}
+function closeConvo() { $('cvSheet').classList.remove('open'); cvCid = null; cvSeq++; }
+$('cvClose').onclick = closeConvo;
+$('cvSheet').addEventListener('click', (e) => { if (e.target === $('cvSheet')) closeConvo(); });
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && $('cvSheet').classList.contains('open')) closeConvo(); });
+document.addEventListener('click', (e) => { const n = e.target.closest('[data-open]'); if (n) openConvo(n.dataset.open); });
+// Mark a row replied in the list (shared by inline reply and the conversation sheet).
+function markReplied(cid) {
+  const li = document.querySelector(`.li.un[data-cv="${CSS.escape(cid)}"]`);
+  const row = (un.rows || []).find((x) => x.conversationId === cid);
+  if (row && !row.answered) row.answered = Date.now(); else if (!row) return;
+  if (li) { li.classList.add('done'); li.querySelector('.rbox')?.remove(); li.querySelector('[data-reply]')?.replaceWith(Object.assign(document.createElement('span'), { className: 'pill ok', textContent: 'Replied' })); }
+  const left = (un.count || 0) - (un.rows || []).filter((x) => x.answered).length;
+  const v = document.querySelector('#unOut .tile .v'); if (v) v.textContent = Math.max(0, left).toLocaleString();
+  const tb = $('unTagBtn'); if (tb) tb.textContent = `Tag ${Math.max(0, left).toLocaleString()} contact${left === 1 ? '' : 's'}`;
+}
 document.addEventListener('click', (e) => {
   const b = e.target.closest('[data-reply]'); if (!b) return;
   const li = b.closest('.li.un'); if (!li || li.querySelector('.rbox')) { li?.querySelector('.rbox textarea')?.focus(); return; }
@@ -950,12 +1052,7 @@ async function unSend(li) {
   btn.disabled = true; ta.disabled = true; btn.textContent = 'Sending…'; li.querySelector('.rerr')?.remove();
   try {
     await post(`/api/unanswered/${encodeURIComponent(un.id)}/reply`, { conversationId: li.dataset.cv, message });
-    li.querySelector('.rbox').remove(); li.classList.add('done');
-    li.querySelector('[data-reply]')?.replaceWith(Object.assign(document.createElement('span'), { className: 'pill ok', textContent: 'Replied' }));
-    const row = (un.rows || []).find((x) => x.conversationId === li.dataset.cv); if (row) row.answered = Date.now();
-    const left = (un.count || 0) - (un.rows || []).filter((x) => x.answered).length;
-    const v = document.querySelector('#unOut .tile .v'); if (v) v.textContent = Math.max(0, left).toLocaleString();
-    const tb = $('unTagBtn'); if (tb) tb.textContent = `Tag ${Math.max(0, left).toLocaleString()} contact${left === 1 ? '' : 's'}`;
+    markReplied(li.dataset.cv);
     RGS.toast('Reply sent');
   } catch (e) {
     btn.disabled = false; ta.disabled = false; btn.textContent = 'Send';
