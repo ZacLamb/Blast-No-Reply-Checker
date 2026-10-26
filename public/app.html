@@ -102,6 +102,18 @@
   .composer textarea { flex: 1; min-height: 38px; max-height: 140px; resize: vertical; border-radius: 18px; padding: 9px 14px; font: 14px var(--font); }
   .composer .note-sm { flex: 1; font-size: 12.5px; color: var(--sec); padding: 6px 4px; }
   .cverr { padding: 0 16px 10px; color: var(--red); font-size: 12.5px; background: var(--grp); }
+  .opps { border-top: .5px solid var(--sep); border-bottom: .5px solid var(--sep); background: var(--grp); padding: 10px 16px; max-height: 42vh; overflow-y: auto; }
+  .opps .oh { display: flex; align-items: center; gap: 8px; font-size: 12px; font-weight: 600; color: var(--sec); text-transform: uppercase; letter-spacing: .02em; margin-bottom: 8px; }
+  .opps .oh .btn { margin-left: auto; text-transform: none; letter-spacing: 0; }
+  .opp { background: var(--main); border-radius: 12px; padding: 10px 12px; margin-bottom: 8px; box-shadow: var(--shadow-sm); }
+  .opp .ot { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; } .opp .ot b { font-weight: 600; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .opp .og { display: grid; grid-template-columns: 1.2fr 1.2fr .9fr .8fr; gap: 8px; }
+  .opp .og.wu { grid-template-columns: 1.1fr 1.1fr .8fr .7fr 1fr; }
+  .opp label { display: block; font-size: 11px; color: var(--sec); margin-bottom: 3px; }
+  .opp select, .opp input { width: 100%; height: 32px; font-size: 13px; }
+  .opp .of { display: flex; align-items: center; gap: 10px; margin-top: 8px; } .opp .of .msg { flex: 1; font-size: 12px; color: var(--sec); } .opp .of .msg.bad { color: var(--red); }
+  .opps .none { font-size: 13px; color: var(--sec); padding: 2px 0 6px; }
+  @media (max-width: 640px) { .opp .og, .opp .og.wu { grid-template-columns: 1fr 1fr; } }
 
   /* schedule pane */
   .pane { flex: 1; min-height: 0; overflow-y: auto; }
@@ -330,6 +342,7 @@
   <!-- Conversation sheet (Unanswered replies) -->
   <div class="sheet-bg" id="cvSheet"><div class="sheet" role="dialog" aria-modal="true">
     <div class="sheet-hd"><span id="cvAv"></span><div style="min-width:0"><h2 id="cvName"></h2><div class="sub" id="cvSub"></div></div><a class="icon-btn x" id="cvOpen" target="_blank" rel="noopener" title="Open in GHL" style="color:var(--blue)"></a><button class="btn plain" id="cvClose">Done</button></div>
+    <div class="opps" id="cvOpps" hidden></div>
     <div class="thread" id="cvThread"></div>
     <div id="cvErr" class="cverr" hidden></div>
     <div class="composer" id="cvComposer"></div>
@@ -1010,7 +1023,7 @@ async function openConvo(cid) {
   $('cvSub').textContent = [row.phone, row.email].filter(Boolean).join(' · ');
   $('cvOpen').innerHTML = I('external'); $('cvOpen').href = convoUrl(curLoc()?.locationId || '', cid);
   $('cvThread').innerHTML = '<div class="sys"><span class="spin"></span> Loading the conversation…</div>';
-  $('cvErr').hidden = true; $('cvComposer').innerHTML = '';
+  $('cvErr').hidden = true; $('cvComposer').innerHTML = ''; $('cvOpps').hidden = true;
   $('cvSheet').classList.add('open');
   try {
     const d = await api(`/api/unanswered/${encodeURIComponent(un.id)}/conversation/${encodeURIComponent(cid)}`);
@@ -1020,8 +1033,68 @@ async function openConvo(cid) {
     $('cvThread').scrollTop = $('cvThread').scrollHeight;
     cvComposer(d.contact);
     setTimeout(() => $('cvText')?.focus(), 0);
+    loadOpps(cid, seq);
   } catch (e) { if (seq === cvSeq) $('cvThread').innerHTML = `<div class="sys" style="color:var(--red)">${esc(e.message)}</div>`; }
 }
+// ---- opportunities panel ----
+let op = { cid: null, pipelines: [], users: [], opps: [], adding: false };
+const money = (n) => '$' + Number(n || 0).toLocaleString(undefined, { maximumFractionDigits: 2 });
+const OPP_PILL = { open: '', won: 'ok', lost: 'bad', abandoned: '' };
+const pipeOpts = (sel) => op.pipelines.map((p) => `<option value="${esc(p.id)}" ${p.id === sel ? 'selected' : ''}>${esc(p.name)}</option>`).join('');
+const stageOpts = (pid, sel) => ((op.pipelines.find((p) => p.id === pid) || {}).stages || []).map((st) => `<option value="${esc(st.id)}" ${st.id === sel ? 'selected' : ''}>${esc(st.name)}</option>`).join('');
+const userOpts = (sel) => `<option value="">Unassigned</option>` + op.users.map((u) => `<option value="${esc(u.id)}" ${u.id === sel ? 'selected' : ''}>${esc(u.name)}</option>`).join('');
+function oppFields(o) {
+  const wu = op.users.length;
+  return `<div class="og${wu ? ' wu' : ''}">
+    <div><label>Pipeline</label><select data-f="pipelineId">${pipeOpts(o.pipelineId)}</select></div>
+    <div><label>Stage</label><select data-f="stageId">${stageOpts(o.pipelineId, o.stageId)}</select></div>
+    ${o.id ? `<div><label>Status</label><select data-f="status">${['open', 'won', 'lost', 'abandoned'].map((x) => `<option value="${x}" ${x === o.status ? 'selected' : ''}>${x[0].toUpperCase() + x.slice(1)}</option>`).join('')}</select></div>` : ''}
+    <div><label>Value ($)</label><input data-f="value" type="number" min="0" step="1" value="${o.value || ''}" placeholder="0"></div>
+    ${wu ? `<div><label>Assigned to</label><select data-f="assignedTo">${userOpts(o.assignedTo)}</select></div>` : ''}
+  </div>`;
+}
+function renderOpps() {
+  const el = $('cvOpps'); el.hidden = false;
+  const head = `<div class="oh">Opportunities${op.opps.length ? ` · ${op.opps.length}` : ''}${op.pipelines.length && !op.adding ? '<button class="btn sm tinted" data-onew>New</button>' : ''}</div>`;
+  const list = op.opps.map((o) => `<div class="opp" data-oid="${esc(o.id)}"><div class="ot"><b title="${esc(o.name)}">${esc(o.name || 'Opportunity')}</b><span class="pill ${OPP_PILL[o.status] || ''}">${esc(o.status)}</span><span class="sec" style="font-size:12.5px">${money(o.value)}</span></div>${oppFields(o)}<div class="of"><span class="msg"></span><button class="btn sm" data-osave disabled>Save</button></div></div>`).join('');
+  const add = op.adding ? `<div class="opp" data-onewform><div class="ot"><b>New opportunity</b></div>${oppFields({ pipelineId: op.pipelines[0]?.id, stageId: op.pipelines[0]?.stages?.[0]?.id, value: '' })}<div class="of"><span class="msg"></span><button class="btn sm plain" data-ocancel>Cancel</button><button class="btn sm" data-ocreate>Create</button></div></div>` : '';
+  el.innerHTML = head + (list || add ? list + add : `<div class="none">${op.pipelines.length ? 'No opportunity for this contact yet.' : 'This sub-account has no pipelines.'}</div>`);
+}
+async function loadOpps(cid, seq) {
+  op = { cid, pipelines: [], users: [], opps: [], adding: false };
+  $('cvOpps').hidden = false; $('cvOpps').innerHTML = '<div class="oh">Opportunities</div><div class="none"><span class="spin"></span> Loading…</div>';
+  try {
+    const d = await api(`/api/unanswered/${encodeURIComponent(un.id)}/opps/${encodeURIComponent(cid)}`);
+    if (seq !== cvSeq) return;
+    Object.assign(op, { pipelines: d.pipelines || [], users: d.users || [], opps: d.opportunities || [] });
+    renderOpps();
+  } catch (e) { if (seq === cvSeq) $('cvOpps').innerHTML = `<div class="oh">Opportunities</div><div class="none" style="color:var(--red)">${esc(e.message)}</div>`; }
+}
+function oppVals(card) { const v = {}; card.querySelectorAll('[data-f]').forEach((f) => { v[f.dataset.f] = f.value; }); return v; }
+$('cvOpps').addEventListener('change', (e) => {
+  const card = e.target.closest('.opp'); if (!card) return;
+  if (e.target.dataset.f === 'pipelineId') { const st = card.querySelector('[data-f="stageId"]'); st.innerHTML = stageOpts(e.target.value); }
+  const sv = card.querySelector('[data-osave]'); if (sv) sv.disabled = false;
+});
+$('cvOpps').addEventListener('input', (e) => { const sv = e.target.closest('.opp')?.querySelector('[data-osave]'); if (sv) sv.disabled = false; });
+$('cvOpps').addEventListener('click', async (e) => {
+  if (e.target.closest('[data-onew]')) { op.adding = true; renderOpps(); return; }
+  if (e.target.closest('[data-ocancel]')) { op.adding = false; renderOpps(); return; }
+  const card = e.target.closest('.opp'); if (!card) return;
+  const msg = card.querySelector('.msg'), btn = e.target.closest('[data-osave],[data-ocreate]'); if (!btn) return;
+  btn.disabled = true; msg.className = 'msg'; msg.textContent = 'Saving…';
+  try {
+    const vals = { ...oppVals(card), conversationId: op.cid };
+    if (btn.dataset.ocreate !== undefined) {
+      const r = await post(`/api/unanswered/${encodeURIComponent(un.id)}/opps`, vals);
+      op.opps.unshift(r.opportunity); op.adding = false; renderOpps(); RGS.toast('Opportunity created');
+    } else {
+      const r = await api(`/api/unanswered/${encodeURIComponent(un.id)}/opps/${encodeURIComponent(card.dataset.oid)}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(vals) });
+      const i = op.opps.findIndex((o) => o.id === card.dataset.oid); if (i >= 0) op.opps[i] = { ...op.opps[i], ...r.opportunity };
+      renderOpps(); RGS.toast('Opportunity updated');
+    }
+  } catch (err) { msg.className = 'msg bad'; msg.textContent = err.message; btn.disabled = false; }
+});
 function closeConvo() { $('cvSheet').classList.remove('open'); cvCid = null; cvSeq++; }
 $('cvClose').onclick = closeConvo;
 $('cvSheet').addEventListener('click', (e) => { if (e.target === $('cvSheet')) closeConvo(); });
