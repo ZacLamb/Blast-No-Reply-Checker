@@ -704,7 +704,7 @@ app.post('/api/unanswered/:id/reply', wrap(async (req, res) => {
     res.json({ ok: true, messageId: d.messageId || d.msg?.id || null });
   } catch (err) {
     if (err.status === 401 || err.status === 403) {
-      return res.status(403).json({ error: 'This sub-account has not allowed sending yet. Reconnect it on the RGS Tools hub to approve the new "send messages" permission, then try again.', needsReconnect: true });
+      return res.status(403).json({ error: 'This sub-account can\'t send messages from here yet. In the sub-account, create a Private Integration token that includes Conversations › Send messages (plus the usual RGS Tools permissions), then add it on the hub under Sub-accounts. Or reply in GHL with the link on the right.', needsReconnect: true });
     }
     res.status(err.status && err.status < 500 ? 400 : 502).json({ error: err.message.replace(/^GHL returned \d+: /, 'GHL: ') });
   }
