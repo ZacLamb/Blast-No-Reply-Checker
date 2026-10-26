@@ -685,6 +685,40 @@ app.get('/api/unanswered/:id/contacts.csv', (req, res) => {
   res.send(rows.join('\n'));
 });
 
+// Full message history for one waiting contact, oldest first (up to 300 messages).
+app.get('/api/unanswered/:id/conversation/:cid', wrap(async (req, res) => {
+  const job = ownedJob(unansweredJobs, req, res, 'Check');
+  if (!job) return;
+  const it = job.items.find((x) => x.conversationId === req.params.cid);
+  if (!it) return res.status(404).json({ error: 'That conversation is not in this check. Run it again.' });
+  const c = await creds(req, res, job.locationId);
+  if (!c) return;
+  const out = [];
+  let lastMessageId = null, more = false;
+  for (let page = 0; page < 3; page++) {
+    const qs = new URLSearchParams({ limit: '100' });
+    if (lastMessageId) qs.set('lastMessageId', lastMessageId);
+    const data = await ghl(c.token, 'GET', `/conversations/${encodeURIComponent(it.conversationId)}/messages?${qs}`, CONVERSATIONS_VERSION);
+    const box = data.messages || {};
+    const list = box.messages || [];
+    for (const m of list) {
+      const call = m.meta?.call || {};
+      out.push({
+        id: m.id, direction: m.direction || '', type: String(m.messageType || '').replace(/^TYPE_/, '').toLowerCase(),
+        body: m.body || '', at: m.dateAdded || null, status: m.status || '',
+        attachments: (m.attachments || []).filter((u) => typeof u === 'string').slice(0, 10),
+        callStatus: call.status || '', callSeconds: Number(call.duration) || 0,
+        subject: m.meta?.email?.subject || '',
+      });
+    }
+    more = !!box.nextPage;
+    if (!box.nextPage || !list.length || !box.lastMessageId || box.lastMessageId === lastMessageId) break;
+    lastMessageId = box.lastMessageId;
+  }
+  out.sort((a, b) => Date.parse(a.at || 0) - Date.parse(b.at || 0));
+  res.json({ contact: { name: it.name, phone: it.phone, email: it.email, contactId: it.contactId, conversationId: it.conversationId, answered: it.answered || null }, locationId: job.locationId, messages: out, more });
+}));
+
 // Reply by text from the dashboard. Needs the conversations/message.write scope: a
 // sub-account connected before that scope was added has to be reconnected on the hub.
 app.post('/api/unanswered/:id/reply', wrap(async (req, res) => {
