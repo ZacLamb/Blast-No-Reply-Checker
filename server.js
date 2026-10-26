@@ -719,6 +719,93 @@ app.get('/api/unanswered/:id/conversation/:cid', wrap(async (req, res) => {
   res.json({ contact: { name: it.name, phone: it.phone, email: it.email, contactId: it.contactId, conversationId: it.conversationId, answered: it.answered || null }, locationId: job.locationId, messages: out, more });
 }));
 
+// ---------- Opportunities for a waiting contact ----------
+// Viewing needs opportunities.readonly; changing needs opportunities.write. Assigning a rep
+// reads the user list (users.readonly) when the token has it; otherwise that picker is hidden.
+const OPP_STATUSES = ['open', 'won', 'lost', 'abandoned'];
+const oppErr = (err) => (err.status === 401 || err.status === 403)
+  ? { status: 403, error: 'This sub-account can\'t edit opportunities from here yet. Add a Private Integration token on the hub that includes Opportunities › Edit (plus the usual RGS Tools permissions), or update it in GHL.' }
+  : { status: err.status && err.status < 500 ? 400 : 502, error: err.message.replace(/^GHL returned \d+: /, 'GHL: ') };
+function oppItem(job, cid) { return job.items.find((x) => x.conversationId === String(cid || '')); }
+const slimOpp = (o) => ({ id: o.id, name: o.name || '', pipelineId: o.pipelineId, stageId: o.pipelineStageId, status: o.status, value: Number(o.monetaryValue) || 0, assignedTo: o.assignedTo || '', updatedAt: o.updatedAt || o.lastStatusChangeAt || null });
+
+app.get('/api/unanswered/:id/opps/:cid', wrap(async (req, res) => {
+  const job = ownedJob(unansweredJobs, req, res, 'Check');
+  if (!job) return;
+  const it = oppItem(job, req.params.cid);
+  if (!it) return res.status(404).json({ error: 'That conversation is not in this check. Run it again.' });
+  const c = await creds(req, res, job.locationId);
+  if (!c) return;
+  try {
+    const loc = encodeURIComponent(job.locationId);
+    const [p, o] = await Promise.all([
+      ghl(c.token, 'GET', `/opportunities/pipelines?locationId=${loc}`, CONTACTS_VERSION),
+      ghl(c.token, 'GET', `/opportunities/search?location_id=${loc}&contact_id=${encodeURIComponent(it.contactId)}&limit=100`, CONTACTS_VERSION),
+    ]);
+    let users = [];
+    try {
+      const u = await ghl(c.token, 'GET', `/users/?locationId=${loc}`, CONTACTS_VERSION);
+      users = (u.users || []).map((x) => ({ id: x.id, name: [x.firstName, x.lastName].filter(Boolean).join(' ') || x.name || x.email || x.id })).sort((a, b) => a.name.localeCompare(b.name));
+    } catch { /* no users scope: assignment picker is hidden */ }
+    res.json({
+      pipelines: (p.pipelines || []).map((x) => ({ id: x.id, name: x.name, stages: (x.stages || []).map((s) => ({ id: s.id, name: s.name })) })),
+      opportunities: (o.opportunities || []).filter((x) => !x.contactId || x.contactId === it.contactId || x.contact?.id === it.contactId).map(slimOpp),
+      users,
+      contactName: it.name || '',
+    });
+  } catch (err) {
+    if (err.status === 401 || err.status === 403) return res.status(403).json({ error: 'This sub-account can\'t read opportunities from here. Reconnect it with a token that includes Opportunities › View.' });
+    const e = oppErr(err); res.status(e.status).json({ error: e.error });
+  }
+}));
+
+app.put('/api/unanswered/:id/opps/:oppId', wrap(async (req, res) => {
+  const job = ownedJob(unansweredJobs, req, res, 'Check');
+  if (!job) return;
+  const it = oppItem(job, req.body.conversationId);
+  if (!it) return res.status(404).json({ error: 'That conversation is not in this check. Run it again.' });
+  const c = await creds(req, res, job.locationId);
+  if (!c) return;
+  try {
+    const cur = await ghl(c.token, 'GET', `/opportunities/${encodeURIComponent(req.params.oppId)}`, CONTACTS_VERSION);
+    const opp = cur.opportunity || cur;
+    if ((opp.contactId || opp.contact?.id) !== it.contactId) return res.status(400).json({ error: 'That opportunity belongs to a different contact.' });
+    const b = req.body || {};
+    const body = {};
+    if (b.pipelineId) body.pipelineId = String(b.pipelineId);
+    if (b.stageId) body.pipelineStageId = String(b.stageId);
+    if (b.status !== undefined) { if (!OPP_STATUSES.includes(b.status)) return res.status(400).json({ error: 'Unknown status.' }); body.status = b.status; }
+    if (b.value !== undefined && b.value !== '') { const v = Number(b.value); if (!Number.isFinite(v) || v < 0) return res.status(400).json({ error: 'Enter a value of 0 or more.' }); body.monetaryValue = v; }
+    if (b.assignedTo !== undefined) body.assignedTo = String(b.assignedTo || '');
+    if (b.name !== undefined && String(b.name).trim()) body.name = String(b.name).trim().slice(0, 200);
+    if (!Object.keys(body).length) return res.status(400).json({ error: 'Nothing to change.' });
+    if (body.pipelineStageId && !body.pipelineId) body.pipelineId = opp.pipelineId;
+    const d = await ghl(c.token, 'PUT', `/opportunities/${encodeURIComponent(req.params.oppId)}`, CONTACTS_VERSION, body);
+    res.json({ ok: true, opportunity: slimOpp(d.opportunity || { ...opp, ...body }) });
+  } catch (err) { const e = oppErr(err); res.status(e.status).json({ error: e.error }); }
+}));
+
+app.post('/api/unanswered/:id/opps', wrap(async (req, res) => {
+  const job = ownedJob(unansweredJobs, req, res, 'Check');
+  if (!job) return;
+  const it = oppItem(job, req.body.conversationId);
+  if (!it) return res.status(404).json({ error: 'That conversation is not in this check. Run it again.' });
+  const b = req.body || {};
+  if (!b.pipelineId || !b.stageId) return res.status(400).json({ error: 'Pick a pipeline and stage.' });
+  const c = await creds(req, res, job.locationId);
+  if (!c) return;
+  const body = {
+    locationId: job.locationId, contactId: it.contactId, pipelineId: String(b.pipelineId), pipelineStageId: String(b.stageId),
+    name: String(b.name || it.name || it.phone || 'New opportunity').trim().slice(0, 200), status: 'open',
+  };
+  const v = Number(b.value); if (b.value !== undefined && b.value !== '' && Number.isFinite(v) && v >= 0) body.monetaryValue = v;
+  if (b.assignedTo) body.assignedTo = String(b.assignedTo);
+  try {
+    const d = await ghl(c.token, 'POST', '/opportunities/', CONTACTS_VERSION, body);
+    res.json({ ok: true, opportunity: slimOpp(d.opportunity || d) });
+  } catch (err) { const e = oppErr(err); res.status(e.status).json({ error: e.error }); }
+}));
+
 // Reply by text from the dashboard. Needs the conversations/message.write scope: a
 // sub-account connected before that scope was added has to be reconnected on the hub.
 app.post('/api/unanswered/:id/reply', wrap(async (req, res) => {
