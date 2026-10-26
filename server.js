@@ -666,7 +666,7 @@ app.get('/api/unanswered/:id', (req, res) => {
     out.count = job.items.length;
     out.optOuts = job.optOuts || 0;
     out.oldest = job.items[0]?.ts || null;
-    out.rows = job.items.slice(0, 300).map(({ conversationId, contactId, name, phone, email, body, type, ts, unread }) => ({ conversationId, contactId, name, phone, email, body, type, ts, unread }));
+    out.rows = job.items.slice(0, 300).map(({ conversationId, contactId, name, phone, email, body, type, ts, unread, answered }) => ({ conversationId, contactId, name, phone, email, body, type, ts, unread, answered: answered || null }));
   }
   res.json(out);
 });
@@ -685,6 +685,31 @@ app.get('/api/unanswered/:id/contacts.csv', (req, res) => {
   res.send(rows.join('\n'));
 });
 
+// Reply by text from the dashboard. Needs the conversations/message.write scope: a
+// sub-account connected before that scope was added has to be reconnected on the hub.
+app.post('/api/unanswered/:id/reply', wrap(async (req, res) => {
+  const job = ownedJob(unansweredJobs, req, res, 'Check');
+  if (!job) return;
+  const it = job.items.find((x) => x.conversationId === String(req.body.conversationId || ''));
+  if (!it) return res.status(404).json({ error: 'That conversation is not in this check. Run it again.' });
+  const message = String(req.body.message || '').trim();
+  if (!message) return res.status(400).json({ error: 'Type a message first.' });
+  if (message.length > 1600) return res.status(400).json({ error: 'That message is too long for a text (1,600 characters max).' });
+  if (!it.phone) return res.status(400).json({ error: 'This contact has no phone number. Reply in GHL instead.' });
+  const c = await creds(req, res, job.locationId);
+  if (!c) return;
+  try {
+    const d = await ghl(c.token, 'POST', '/conversations/messages', CONVERSATIONS_VERSION, { type: 'SMS', contactId: it.contactId, message });
+    it.answered = Date.now();
+    res.json({ ok: true, messageId: d.messageId || d.msg?.id || null });
+  } catch (err) {
+    if (err.status === 401 || err.status === 403) {
+      return res.status(403).json({ error: 'This sub-account can\'t send messages from here yet. In the sub-account, create a Private Integration token that includes Conversations › Send messages (plus the usual RGS Tools permissions), then add it on the hub under Sub-accounts. Or reply in GHL with the link on the right.', needsReconnect: true });
+    }
+    res.status(err.status && err.status < 500 ? 400 : 502).json({ error: err.message.replace(/^GHL returned \d+: /, 'GHL: ') });
+  }
+}));
+
 app.post('/api/unanswered/:id/tag', wrap(async (req, res) => {
   const job = ownedJob(unansweredJobs, req, res, 'Check');
   if (!job) return;
@@ -693,12 +718,13 @@ app.post('/api/unanswered/:id/tag', wrap(async (req, res) => {
   if (!c) return;
   const tag = String(req.body.tag || '').trim().toLowerCase();
   if (!tag) return res.status(400).json({ error: 'Enter a tag name.' });
-  if (!job.items.length) return res.status(400).json({ error: 'Nobody is waiting on a reply.' });
+  const waiting = job.items.filter((x) => !x.answered);
+  if (!waiting.length) return res.status(400).json({ error: 'Nobody is waiting on a reply.' });
   const id = crypto.randomUUID();
-  const t = { status: 'running', done: 0, failed: 0, total: job.items.length, tag, createdAt: Date.now(), owner: req.hubUser.id };
+  const t = { status: 'running', done: 0, failed: 0, total: waiting.length, tag, createdAt: Date.now(), owner: req.hubUser.id };
   tagJobs.set(id, t);
-  bg(t, runTagJob(t, c.token, job.items, tag));
-  res.json({ jobId: id, total: job.items.length });
+  bg(t, runTagJob(t, c.token, waiting, tag));
+  res.json({ jobId: id, total: waiting.length });
 }));
 
 // Schedules belong to the hub user + sub-account; the hub already proved the

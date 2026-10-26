@@ -53,7 +53,7 @@ Custom domain must be a subdomain of the hub's `COOKIE_DOMAIN` (e.g. `blast.your
 and the hub needs `TOOL_URL_BLAST_TOOLS=https://blast.yourbizzassist.co`.
 
 Scopes used (already on the hub's marketplace app): `conversations.readonly`,
-`conversations/message.readonly`, `contacts.write`.
+`conversations/message.readonly`, `contacts.write`, and `conversations/message.write` (only for replying from the Unanswered replies tab).
 
 ## Use
 
