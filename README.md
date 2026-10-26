@@ -40,7 +40,10 @@ The **Unanswered replies** tab lists every contact whose conversation ends on *t
 message: they texted (or, with "all channels", called, emailed or chatted) and nobody in
 the sub-account has answered since. Longest wait first, with a link to each conversation,
 a CSV export and an optional tag (`needs-reply-YYYY-MM-DD`) so you can filter them in GHL.
-Replies that are just an opt-out word (STOP, unsubscribe…) are left out. "Waiting at least"
+Replies that are just an opt-out word (STOP, unsubscribe…) are left out, and so are contacts on
+Do Not Disturb (all channels or SMS). **Mark replied** hides a conversation you handled another
+way (call, in person); it comes back if the contact sends something newer. Those marks are stored
+per hub user and sub-account (Postgres table `handled`, or `handled.json` in `DATA_DIR`). "Waiting at least"
 skips replies that only just came in.
 
 ## Deploy (Railway)
