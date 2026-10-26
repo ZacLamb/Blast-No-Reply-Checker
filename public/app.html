@@ -85,6 +85,7 @@
 
   /* conversation sheet */
   .li.un .re { display: inline-flex; align-items: center; gap: 6px; }
+  #unSort { text-transform: none; letter-spacing: 0; } #unSort button { padding: 2px 10px; font-size: 12px; font-weight: 500; }
   .li.un .main b.nm { cursor: pointer; } .li.un .main b.nm:hover { color: var(--blue); text-decoration: underline; }
   #cvSheet .sheet { max-width: 640px; display: flex; flex-direction: column; max-height: calc(100vh - 96px); }
   #cvSheet .sheet-hd .sub { color: var(--sec); font-size: 12.5px; }
@@ -917,7 +918,7 @@ $('cpRunNow').onclick = async () => {
 };
 
 // ---------- Unanswered replies ----------
-const un = { id: null, seq: 0, tagging: false };
+const un = { id: null, seq: 0, tagging: false, sort: (() => { try { return localStorage.getItem('bnrf-un-sort') === 'newest' ? 'newest' : 'oldest'; } catch (e) { return 'oldest'; } })() };
 const waitFor = (ts) => { const m = Math.max(0, Math.round((Date.now() - ts) / 60000)); if (m < 60) return m + 'm'; const h = Math.floor(m / 60); if (h < 48) return h + 'h' + (m % 60 && h < 10 ? ' ' + (m % 60) + 'm' : ''); return Math.floor(h / 24) + 'd'; };
 const convoUrl = (loc, id) => `https://app.gohighlevel.com/v2/location/${encodeURIComponent(loc)}/conversations/conversations/${encodeURIComponent(id)}`;
 function unReset() {
@@ -939,7 +940,7 @@ async function unRun() {
     for (;;) {
       await sleep(1200);
       if (seq !== un.seq) return;
-      r = await api('/api/unanswered/' + id);
+      r = await api(`/api/unanswered/${id}?sort=${un.sort}`);
       if (r.status !== 'running') break;
       $('unStatus').innerHTML = r.phase === 'dnd' ? `<span class="spin"></span> Checking Do Not Disturb… ${r.dndChecked} of ${r.dndTotal}` : `<span class="spin"></span> Reading conversations… ${r.scanned} waiting so far`;
     }
@@ -965,13 +966,15 @@ function unRender(r, loc) {
     return;
   }
   const d = new Date(); const tag = `needs-reply-${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-  $('unOut').innerHTML = `<div class="tiles">${tile('Waiting on a reply', r.count.toLocaleString())}${tile('Longest wait', esc(waitFor(r.oldest)))}<div class="tile"><div class="k">Left out</div><div class="v">${((r.optOuts || 0) + (r.dnd || 0) + (r.handled || 0)).toLocaleString()}</div><div class="sec" style="font-size:12px">${esc(leftOut(r) || 'Opt-outs, DND and marked replied')}</div></div></div>
+  $('unOut').innerHTML = `<div class="tiles">${tile('Waiting on a reply', Math.max(0, r.count - r.rows.filter((x) => x.answered).length).toLocaleString())}${tile('Longest wait', esc(waitFor(r.oldest)))}<div class="tile"><div class="k">Left out</div><div class="v">${((r.optOuts || 0) + (r.dnd || 0) + (r.handled || 0)).toLocaleString()}</div><div class="sec" style="font-size:12px">${esc(leftOut(r) || 'Opt-outs, DND and marked replied')}</div></div></div>
     <div class="gh">Tag them<span class="end" style="font-weight:400"></span></div>
     <div class="grp"><div class="fr"><div class="lbl">Tag to add<small>So you can filter them in GHL or hand them to a rep</small></div><div class="ctl"><input id="unTag" type="text" value="${esc(tag)}" autocomplete="off" spellcheck="false"></div></div></div>
-    <div class="btnrow" style="margin-top:8px"><button class="btn lg" id="unTagBtn">Tag ${r.count.toLocaleString()} contact${r.count === 1 ? '' : 's'}</button><a class="btn tinted lg" href="/api/unanswered/${encodeURIComponent(un.id)}/contacts.csv">Export CSV</a><span class="status" id="unTagStatus" style="margin:0"></span></div>
-    <div class="gh">Waiting longest first${r.count > r.rows.length ? ` · showing ${r.rows.length} of ${r.count.toLocaleString()}` : ''}</div>
+    <div class="btnrow" style="margin-top:8px"><button class="btn lg" id="unTagBtn">Tag ${Math.max(0, r.count - r.rows.filter((x) => x.answered).length).toLocaleString()} contacts</button><a class="btn tinted lg" href="/api/unanswered/${encodeURIComponent(un.id)}/contacts.csv">Export CSV</a><span class="status" id="unTagStatus" style="margin:0"></span></div>
+    <div class="gh">${r.count > r.rows.length ? `Showing ${r.rows.length} of ${r.count.toLocaleString()}` : `${Math.max(0, r.count - r.rows.filter((x) => x.answered).length).toLocaleString()} waiting`}<span class="end"><span class="seg mini" id="unSort"><button data-s="oldest" class="${un.sort === 'oldest' ? 'on' : ''}">Longest wait first</button><button data-s="newest" class="${un.sort === 'newest' ? 'on' : ''}">Newest first</button></span></span></div>
     <div class="grp people" id="unList">${r.rows.map((x) => `<div class="li un${x.answered ? ' done' : ''}" data-cv="${esc(x.conversationId)}">${RGS.avatarHtml(x.name || x.phone || '?', 'sm round')}<div class="main"><b class="nm" data-open="${esc(x.conversationId)}" title="See the full conversation">${esc(x.name || x.phone || x.email || 'Unknown')}</b><span class="sub">${x.type !== 'sms' && x.body ? esc(x.type.replace(/^./, (ch) => ch.toUpperCase())) + ' · ' : ''}<span class="msg">${esc(x.body || ({ call: 'Incoming call', email: 'Email', sms: 'Text' }[x.type] || x.type.replace(/^./, (ch) => ch.toUpperCase())))}</span></span></div><span class="end"><span class="ts" title="${esc(fmtWhen(x.ts))}">${esc(waitFor(x.ts))}</span><span class="re">${rowEnd(x)}</span><a class="icon-btn" href="${convoUrl(loc, x.conversationId)}" target="_blank" rel="noopener" title="Open the conversation in GHL" style="color:var(--blue)">${I('external')}</a></span></div>`).join('')}</div>`;
-  un.rows = r.rows; un.count = r.count; un.loc = loc;
+  un.rows = r.rows; un.count = r.count; un.loc = loc; un.last = r;
+  $('unSort').onclick = (e) => { const b = e.target.closest('button[data-s]'); if (b && b.dataset.s !== un.sort) unResort(b.dataset.s); };
+  const csv = document.querySelector('#unOut a[href*="contacts.csv"]'); if (csv) csv.href = `/api/unanswered/${encodeURIComponent(un.id)}/contacts.csv?sort=${un.sort}`;
   $('unTagBtn').onclick = () => unTag(r.count);
 }
 async function unTag(total) {
@@ -991,6 +994,17 @@ async function unTag(total) {
   } finally { un.tagging = false; $('unTagBtn').disabled = false; }
 }
 $('unRun').onclick = unRun;
+// Re-order the current check without running it again; marks and replies made so far are kept.
+async function unResort(sort) {
+  un.sort = sort; try { localStorage.setItem('bnrf-un-sort', sort); } catch (e) {}
+  if (!un.id) return;
+  const seen = new Map((un.rows || []).filter((x) => x.answered).map((x) => [x.conversationId, x.answered]));
+  try {
+    const r = await api(`/api/unanswered/${encodeURIComponent(un.id)}?sort=${sort}`);
+    r.rows.forEach((x) => { if (!x.answered && seen.has(x.conversationId)) x.answered = seen.get(x.conversationId); });
+    unRender(r, un.loc);
+  } catch (e) { RGS.toast(e.message, { error: true }); }
+}
 
 // ---- full conversation (click a name) ----
 let cvCid = null, cvSeq = 0;
