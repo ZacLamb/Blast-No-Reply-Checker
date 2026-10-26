@@ -705,7 +705,9 @@ app.get('/api/unanswered/:id', (req, res) => {
     out.dnd = job.dnd || 0;
     out.handled = job.handled || 0;
     out.oldest = job.items[0]?.ts || null;
-    out.rows = job.items.slice(0, 300).map(({ conversationId, contactId, name, phone, email, body, type, ts, unread, answered }) => ({ conversationId, contactId, name, phone, email, body, type, ts, unread, answered: answered || null }));
+    out.sort = req.query.sort === 'newest' ? 'newest' : 'oldest';
+    const ordered = out.sort === 'newest' ? [...job.items].reverse() : job.items;
+    out.rows = ordered.slice(0, 300).map(({ conversationId, contactId, name, phone, email, body, type, ts, unread, answered }) => ({ conversationId, contactId, name, phone, email, body, type, ts, unread, answered: answered || null }));
   }
   res.json(out);
 });
@@ -716,7 +718,7 @@ app.get('/api/unanswered/:id/contacts.csv', (req, res) => {
   const q = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
   const esc = (v) => q(String(v ?? '').replace(/^([=+\-@])/, "'$1"));
   const rows = [['Contact ID', 'Name', 'Phone', 'Email', 'Channel', 'Their last message', 'Sent at (UTC)', 'Waiting (hours)'].map(esc).join(',')];
-  for (const it of job.items) {
+  for (const it of (req.query.sort === 'newest' ? [...job.items].reverse() : job.items)) {
     rows.push([q(it.contactId), esc(it.name), q(it.phone), q(it.email), q(it.type), esc(it.body), q(new Date(it.ts).toISOString()), q(((Date.now() - it.ts) / 3600000).toFixed(1))].join(','));
   }
   res.setHeader('Content-Type', 'text/csv; charset=utf-8');
