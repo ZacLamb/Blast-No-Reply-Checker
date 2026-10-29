@@ -64,3 +64,13 @@ test('resendAll stops on a permission error', async () => {
   await resendAll(job, async () => { n++; const e = new Error('no'); e.status = 403; throw e; }, rows, 'v', async () => {});
   assert.equal(n, 1); assert.equal(job.status, 'error'); assert.equal(job.error, 'reconnect');
 });
+
+test('errText reads the reason whatever shape it comes in', () => {
+  const { errText } = require('../failed-sends');
+  assert.equal(errText({ error: '30003 Unreachable' }), '30003 Unreachable');
+  assert.equal(errText({ error: { code: 30007, message: 'Carrier violation' } }), '30007 Carrier violation');
+  assert.equal(errText({ errorCode: 21610, errorMessage: 'Unsubscribed' }), '21610 Unsubscribed');
+  assert.equal(errText({ meta: { error: 'Landline' } }), 'Landline');
+  assert.equal(errText({}), '');
+  assert.equal(classify(errText({ error: { code: 30007 } })).verdict, 'skip');
+});
