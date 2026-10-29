@@ -17,6 +17,7 @@ const hub = require('./hub-client')({ toolSlug: 'blast-tools' });
 const apiUsage = require('./ghl-usage')({ tool: 'blast-tools' });
 apiUsage.bindHub(hub);
 const crypto = require('crypto');
+const failedSends = require('./failed-sends');
 const path = require('path');
 const fs = require('fs');
 
@@ -926,6 +927,98 @@ app.post('/api/unanswered/:id/tag', wrap(async (req, res) => {
   res.json({ jobId: id, total: waiting.length });
 }));
 
+// ---------- Failed sends ----------
+// Find outbound texts that failed in a date range, then resend the ones that are safe to retry.
+const failedJobs = new Map(); // id -> { status, scanned, rows, ... }
+const resendJobs = new Map(); // id -> { status, done, sent, failed, total, rows }
+const NEED_SEND = 'This sub-account can\'t send messages from here yet. In the sub-account, create a Private Integration token that includes Conversations › Send messages (plus the usual RGS Tools permissions), then add it on the hub under Sub-accounts.';
+const failRow = (r) => ({ contactId: r.contactId, conversationId: r.conversationId, body: r.body, hasMedia: r.attachments.length > 0, from: r.from, to: r.to, ts: r.ts, error: r.error, code: r.code, reason: r.reason, verdict: r.verdict, dnd: !!r.dnd, failedCount: r.failedCount, resent: r.resent || null });
+
+app.post('/api/failed', wrap(async (req, res) => {
+  const c = await creds(req, res);
+  if (!c) return;
+  const days = Math.min(90, Math.max(1, Number(req.body.days) || 7));
+  const to = Date.now(), from = to - days * 86400000;
+  const id = crypto.randomUUID();
+  const job = { status: 'running', scanned: 0, rows: [], createdAt: Date.now(), owner: req.hubUser.id, locationId: c.locationId, days };
+  failedJobs.set(id, job);
+  const call = (m, p, v, b) => ghl(c.token, m, p, v, b);
+  bg(job, (async () => {
+    await failedSends.scanFailed(job, call, { locationId: c.locationId, from, to });
+    job.status = 'done';
+    // Do Not Disturb is checked after the list shows; DND contacts are marked, never resent.
+    job.dndTotal = job.rows.length; job.dndChecked = 0; job.dnd = 0; job.dndDone = false;
+    const shadow = { items: job.rows.map((r) => ({ contactId: r.contactId, conversationId: r.contactId, row: r })), dnd: 0, dndChecked: 0 };
+    const order = [...shadow.items]; // checkDnd drops DND items from shadow.items when it finishes
+    const tick = setInterval(() => { job.dndChecked = shadow.dndChecked; job.dnd = shadow.dnd; }, 500);
+    try { await checkDnd(shadow, c.token, c.locationId, order); } finally { clearInterval(tick); }
+    for (const it of order) if (it.dnd) it.row.dnd = true;
+    job.dndChecked = shadow.dndChecked; job.dnd = shadow.dnd; job.dndError = shadow.dndError || null; job.dndDone = true;
+  })().catch((err) => { if (job.status === 'running') { job.status = 'error'; job.error = err.status === 401 || err.status === 403 ? 'This sub-account\'s connection can\'t read message history. Reconnect it on the hub.' : err.message; } else { job.dndDone = true; } }));
+  res.json({ id });
+}));
+
+app.get('/api/failed/:id', (req, res) => {
+  const job = ownedJob(failedJobs, req, res, 'Check');
+  if (!job) return;
+  const out = { status: job.status, scanned: job.scanned, error: job.error || null, locationId: job.locationId, dndChecked: job.dndChecked || 0, dndTotal: job.dndTotal || 0, dndDone: !!job.dndDone, dnd: job.dnd || 0, dndError: job.dndError || null };
+  if (job.status === 'done') {
+    Object.assign(out, { failedTotal: job.failedTotal || 0, reached: job.reached || 0, replied: job.replied || 0, truncated: !!job.truncated });
+    out.counts = { retry: 0, check: 0, skip: 0 };
+    for (const r of job.rows) if (!r.dnd) out.counts[r.verdict]++;
+    out.rows = job.rows.slice(0, 1000).map(failRow);
+  }
+  res.json(out);
+});
+
+app.post('/api/failed/:id/resend', wrap(async (req, res) => {
+  const job = ownedJob(failedJobs, req, res, 'Check');
+  if (!job) return;
+  if (job.status !== 'done') return res.status(409).json({ error: 'The check is not finished yet.' });
+  if (!job.dndDone) return res.status(409).json({ error: `Still checking Do Not Disturb (${job.dndChecked || 0} of ${job.dndTotal || 0}). Try again in a moment.` });
+  const want = new Set((Array.isArray(req.body.contactIds) ? req.body.contactIds : []).map(String));
+  // Never resend a "don't retry" error, a DND contact, or a text that was already resent.
+  const rows = job.rows.filter((r) => want.has(r.contactId) && r.verdict !== 'skip' && !r.dnd && !r.resent?.ok && (r.body || r.attachments.length));
+  if (!rows.length) return res.status(400).json({ error: 'Pick at least one text that is safe to resend.' });
+  if (resendJobs.size && [...resendJobs.values()].some((j) => j.status === 'running' && j.checkId === req.params.id)) return res.status(409).json({ error: 'A resend is already running for this check.' });
+  const c = await creds(req, res, job.locationId);
+  if (!c) return;
+  const id = crypto.randomUUID();
+  const r = { status: 'running', done: 0, sent: 0, failed: 0, total: rows.length, createdAt: Date.now(), owner: req.hubUser.id, checkId: req.params.id, rows };
+  resendJobs.set(id, r);
+  bg(r, failedSends.resendAll(r, (m, p, v, b) => ghl(c.token, m, p, v, b), rows, CONVERSATIONS_VERSION));
+  res.json({ jobId: id, total: rows.length });
+}));
+
+app.get('/api/resend/:id', (req, res) => {
+  const job = ownedJob(resendJobs, req, res, 'Resend');
+  if (!job) return;
+  res.json({ status: job.status, done: job.done, sent: job.sent, failed: job.failed, total: job.total, error: job.error === 'reconnect' ? NEED_SEND : job.error || null, needsReconnect: job.error === 'reconnect' });
+});
+
+app.post('/api/resend/:id/stop', (req, res) => {
+  const job = ownedJob(resendJobs, req, res, 'Resend');
+  if (!job) return;
+  job.stop = true;
+  res.json({ ok: true });
+});
+
+app.get('/api/failed/:id/results.csv', (req, res) => {
+  const job = ownedJob(failedJobs, req, res, 'Check');
+  if (!job) return;
+  const q = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+  const esc = (v) => q(String(v ?? '').replace(/^([=+\-@])/, "'$1"));
+  const out = [['Contact ID', 'To', 'From', 'Failed at (UTC)', 'Error code', 'Reason', 'Verdict', 'Do Not Disturb', 'Message', 'Resent', 'Resend result'].map(esc).join(',')];
+  const label = { retry: 'Safe to retry', check: 'Check first', skip: "Don't retry" };
+  for (const r of job.rows) {
+    out.push([q(r.contactId), q(r.to), q(r.from), q(new Date(r.ts).toISOString()), q(r.code || ''), esc(r.reason), q(label[r.verdict]), q(r.dnd ? 'yes' : ''), esc(r.body),
+      q(r.resent ? (r.resent.ok ? 'yes' : 'failed') : ''), esc(r.resent ? (r.resent.ok ? new Date(r.resent.at).toISOString() : r.resent.error) : '')].join(','));
+  }
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', 'attachment; filename="failed-sends.csv"');
+  res.send(out.join('\n'));
+});
+
 // Schedules belong to the hub user + sub-account; the hub already proved the
 // user owns that connection, so no GHL round-trip is needed here.
 async function authed(req, res) {
@@ -1021,6 +1114,8 @@ setInterval(() => {
   for (const [id, j] of tagJobs) if (now - j.createdAt > KEEP_MS) tagJobs.delete(id);
   for (const [id, j] of verifyJobs) if (now - j.createdAt > KEEP_MS) verifyJobs.delete(id);
   for (const [id, j] of unansweredJobs) if (now - j.createdAt > KEEP_MS) unansweredJobs.delete(id);
+  for (const [id, j] of failedJobs) if (now - j.createdAt > KEEP_MS) failedJobs.delete(id);
+  for (const [id, j] of resendJobs) if (now - j.createdAt > KEEP_MS && j.status !== 'running') resendJobs.delete(id);
 }, 10 * 60 * 1000).unref();
 
 store.init().then(() => {
