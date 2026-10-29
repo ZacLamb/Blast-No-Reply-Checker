@@ -286,13 +286,14 @@ async function checkDnd(job, token, locationId, order) {
           const d = await ghl(token, 'GET', `/contacts/${encodeURIComponent(it.contactId)}`, CONTACTS_VERSION);
           const ct = d.contact || {};
           const sms = ct.dndSettings?.SMS?.status;
-          hit = { dnd: ct.dnd === true || sms === 'active' || sms === 'permanent', at: Date.now() };
+          hit = { dnd: ct.dnd === true || sms === 'active' || sms === 'permanent', name: ct.contactName || [ct.firstName, ct.lastName].filter(Boolean).join(' ') || ct.companyName || '', at: Date.now() };
           dndCache.set(key, hit);
         } catch (err) {
           if (err.status === 401 || err.status === 403) { job.dndError = err.message; job.dndStop = true; return; }
           hit = { dnd: false }; // unreadable contact: keep it on the list
         }
       }
+      if (hit.name && !it.name) it.name = hit.name;
       if (hit.dnd) { it.dnd = true; job.dnd++; (job.dndIds ||= []).push(it.conversationId); }
       job.dndChecked++;
     }
@@ -752,19 +753,14 @@ app.get('/api/unanswered/:id/contacts.csv', (req, res) => {
 });
 
 // Full message history for one waiting contact, oldest first (up to 300 messages).
-app.get('/api/unanswered/:id/conversation/:cid', wrap(async (req, res) => {
-  const job = ownedJob(unansweredJobs, req, res, 'Check');
-  if (!job) return;
-  const it = job.items.find((x) => x.conversationId === req.params.cid);
-  if (!it) return res.status(404).json({ error: 'That conversation is not in this check. Run it again.' });
-  const c = await creds(req, res, job.locationId);
-  if (!c) return;
+// Up to 300 messages of one conversation, oldest first.
+async function readConversation(token, conversationId) {
   const out = [];
   let lastMessageId = null, more = false;
   for (let page = 0; page < 3; page++) {
     const qs = new URLSearchParams({ limit: '100' });
     if (lastMessageId) qs.set('lastMessageId', lastMessageId);
-    const data = await ghl(c.token, 'GET', `/conversations/${encodeURIComponent(it.conversationId)}/messages?${qs}`, CONVERSATIONS_VERSION);
+    const data = await ghl(token, 'GET', `/conversations/${encodeURIComponent(conversationId)}/messages?${qs}`, CONVERSATIONS_VERSION);
     const box = data.messages || {};
     const list = box.messages || [];
     for (const m of list) {
@@ -782,6 +778,17 @@ app.get('/api/unanswered/:id/conversation/:cid', wrap(async (req, res) => {
     lastMessageId = box.lastMessageId;
   }
   out.sort((a, b) => Date.parse(a.at || 0) - Date.parse(b.at || 0));
+  return { messages: out, more };
+}
+
+app.get('/api/unanswered/:id/conversation/:cid', wrap(async (req, res) => {
+  const job = ownedJob(unansweredJobs, req, res, 'Check');
+  if (!job) return;
+  const it = job.items.find((x) => x.conversationId === req.params.cid);
+  if (!it) return res.status(404).json({ error: 'That conversation is not in this check. Run it again.' });
+  const c = await creds(req, res, job.locationId);
+  if (!c) return;
+  const { messages: out, more } = await readConversation(c.token, it.conversationId);
   res.json({ contact: { name: it.name, phone: it.phone, email: it.email, contactId: it.contactId, conversationId: it.conversationId, answered: it.answered || null }, locationId: job.locationId, messages: out, more });
 }));
 
@@ -932,7 +939,7 @@ app.post('/api/unanswered/:id/tag', wrap(async (req, res) => {
 const failedJobs = new Map(); // id -> { status, scanned, rows, ... }
 const resendJobs = new Map(); // id -> { status, done, sent, failed, total, rows }
 const NEED_SEND = 'This sub-account can\'t send messages from here yet. In the sub-account, create a Private Integration token that includes Conversations › Send messages (plus the usual RGS Tools permissions), then add it on the hub under Sub-accounts.';
-const failRow = (r) => ({ contactId: r.contactId, conversationId: r.conversationId, body: r.body, hasMedia: r.attachments.length > 0, from: r.from, to: r.to, ts: r.ts, error: r.error, code: r.code, reason: r.reason, verdict: r.verdict, dnd: !!r.dnd, failedCount: r.failedCount, resent: r.resent || null });
+const failRow = (r) => ({ name: r.name || '', contactId: r.contactId, conversationId: r.conversationId, body: r.body, hasMedia: r.attachments.length > 0, from: r.from, to: r.to, ts: r.ts, error: r.error, code: r.code, reason: r.reason, verdict: r.verdict, dnd: !!r.dnd, failedCount: r.failedCount, resent: r.resent || null });
 
 app.post('/api/failed', wrap(async (req, res) => {
   const c = await creds(req, res);
@@ -952,7 +959,7 @@ app.post('/api/failed', wrap(async (req, res) => {
     const order = [...shadow.items]; // checkDnd drops DND items from shadow.items when it finishes
     const tick = setInterval(() => { job.dndChecked = shadow.dndChecked; job.dnd = shadow.dnd; }, 500);
     try { await checkDnd(shadow, c.token, c.locationId, order); } finally { clearInterval(tick); }
-    for (const it of order) if (it.dnd) it.row.dnd = true;
+    for (const it of order) { if (it.dnd) it.row.dnd = true; if (it.name) it.row.name = it.name; }
     job.dndChecked = shadow.dndChecked; job.dnd = shadow.dnd; job.dndError = shadow.dndError || null; job.dndDone = true;
   })().catch((err) => { if (job.status === 'running') { job.status = 'error'; job.error = err.status === 401 || err.status === 403 ? 'This sub-account\'s connection can\'t read message history. Reconnect it on the hub.' : err.message; } else { job.dndDone = true; } }));
   res.json({ id });
@@ -970,6 +977,22 @@ app.get('/api/failed/:id', (req, res) => {
   }
   res.json(out);
 });
+
+app.get('/api/failed/:id/conversation/:contactId', wrap(async (req, res) => {
+  const job = ownedJob(failedJobs, req, res, 'Check');
+  if (!job) return;
+  const r = job.rows.find((x) => x.contactId === req.params.contactId);
+  if (!r) return res.status(404).json({ error: 'That contact is not in this check. Run it again.' });
+  const c = await creds(req, res, job.locationId);
+  if (!c) return;
+  if (!r.conversationId) {
+    const d = await ghl(c.token, 'GET', `/conversations/search?${new URLSearchParams({ locationId: c.locationId, contactId: r.contactId, limit: '1' })}`, CONVERSATIONS_VERSION);
+    r.conversationId = d.conversations?.[0]?.id || null;
+    if (!r.conversationId) return res.status(404).json({ error: 'No conversation found for this contact.' });
+  }
+  const { messages, more } = await readConversation(c.token, r.conversationId);
+  res.json({ contact: failRow(r), locationId: job.locationId, messages, more });
+}));
 
 app.post('/api/failed/:id/resend', wrap(async (req, res) => {
   const job = ownedJob(failedJobs, req, res, 'Check');
@@ -1008,10 +1031,10 @@ app.get('/api/failed/:id/results.csv', (req, res) => {
   if (!job) return;
   const q = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
   const esc = (v) => q(String(v ?? '').replace(/^([=+\-@])/, "'$1"));
-  const out = [['Contact ID', 'To', 'From', 'Failed at (UTC)', 'Error code', 'Reason', 'Verdict', 'Do Not Disturb', 'Message', 'Resent', 'Resend result'].map(esc).join(',')];
+  const out = [['Contact ID', 'Name', 'To', 'From', 'Failed at (UTC)', 'Error code', 'Reason', 'Verdict', 'Do Not Disturb', 'Message', 'Resent', 'Resend result'].map(esc).join(',')];
   const label = { retry: 'Safe to retry', check: 'Check first', skip: "Don't retry" };
   for (const r of job.rows) {
-    out.push([q(r.contactId), q(r.to), q(r.from), q(new Date(r.ts).toISOString()), q(r.code || ''), esc(r.reason), q(label[r.verdict]), q(r.dnd ? 'yes' : ''), esc(r.body),
+    out.push([q(r.contactId), esc(r.name), q(r.to), q(r.from), q(new Date(r.ts).toISOString()), q(r.code || ''), esc(r.reason), q(label[r.verdict]), q(r.dnd ? 'yes' : ''), esc(r.body),
       q(r.resent ? (r.resent.ok ? 'yes' : 'failed') : ''), esc(r.resent ? (r.resent.ok ? new Date(r.resent.at).toISOString() : r.resent.error) : '')].join(','));
   }
   res.setHeader('Content-Type', 'text/csv; charset=utf-8');

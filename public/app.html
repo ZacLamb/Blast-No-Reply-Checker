@@ -86,6 +86,7 @@
   /* conversation sheet */
   .li.un .re { display: inline-flex; align-items: center; gap: 6px; }
   #unSort { text-transform: none; letter-spacing: 0; } #unSort button { padding: 2px 10px; font-size: 12px; font-weight: 500; }
+  .li.fl .main b.nm { cursor: pointer; } .li.fl .main b.nm:hover { color: var(--blue); }
   .li.un .main b.nm { cursor: pointer; } .li.un .main b.nm:hover { color: var(--blue); text-decoration: underline; }
   #cvSheet .sheet { max-width: 640px; display: flex; flex-direction: column; max-height: calc(100vh - 96px); }
   #cvSheet .sheet-hd .sub { color: var(--sec); font-size: 12.5px; }
@@ -1088,7 +1089,7 @@ function flRow(x, loc) {
     : x.resent ? (x.resent.ok ? '<span class="pill ok">Resent</span>' : `<span class="pill bad" title="${esc(x.resent.error || '')}">Resend failed</span>`)
     : `<span class="pill ${x.verdict === 'retry' ? 'ok' : x.verdict === 'skip' ? 'bad' : ''}">${FL_LABEL[x.verdict]}</span>`;
   const why = (x.code ? x.code + ' · ' : '') + x.reason;
-  return `<div class="li fl${can ? '' : ' done'}" data-ct="${esc(x.contactId)}"><label style="display:flex;align-items:center;gap:10px;flex:1;min-width:0;cursor:${can ? 'pointer' : 'default'}"><input type="checkbox" class="flPick" value="${esc(x.contactId)}" ${can && x.verdict === 'retry' ? 'checked' : ''} ${can ? '' : 'disabled'}><div class="main"><b class="nm">${esc(x.to || 'Unknown number')}</b><span class="sub"><span class="msg">${esc(x.body || (x.hasMedia ? 'Picture message' : '(empty)'))}</span></span><span class="sub" style="color:var(--sec)">${esc(why)}${x.failedCount > 1 ? ` · failed ${x.failedCount} times` : ''}</span></div></label><span class="end"><span class="ts" title="${esc(fmtWhen(x.ts))}">${esc(shortDay(x.ts))}</span><span class="re">${tag}</span>${x.conversationId ? `<a class="icon-btn" href="${convoUrl(loc, x.conversationId)}" target="_blank" rel="noopener" title="Open the conversation in GHL" style="color:var(--blue)">${I('external')}</a>` : ''}</span></div>`;
+  return `<div class="li fl${can ? '' : ' done'}" data-ct="${esc(x.contactId)}"><label style="display:flex;align-items:center;gap:10px;flex:1;min-width:0;cursor:${can ? 'pointer' : 'default'}"><input type="checkbox" class="flPick" value="${esc(x.contactId)}" ${can && x.verdict === 'retry' ? 'checked' : ''} ${can ? '' : 'disabled'}><div class="main"><b class="nm" data-flopen="${esc(x.contactId)}" title="See the full conversation">${esc(x.name || x.to || 'Unknown number')}${x.name && x.to ? `<span style="font-weight:400;color:var(--sec);margin-left:6px">${esc(x.to)}</span>` : ''}</b><span class="sub"><span class="msg">${esc(x.body || (x.hasMedia ? 'Picture message' : '(empty)'))}</span></span><span class="sub" style="color:var(--sec)">${esc(why)}${x.failedCount > 1 ? ` · failed ${x.failedCount} times` : ''}</span></div></label><span class="end"><span class="ts" title="${esc(fmtWhen(x.ts))}">${esc(shortDay(x.ts))}</span><span class="re">${tag}</span>${x.conversationId ? `<a class="icon-btn" href="${convoUrl(loc, x.conversationId)}" target="_blank" rel="noopener" title="Open the conversation in GHL" style="color:var(--blue)">${I('external')}</a>` : ''}</span></div>`;
 }
 function flRender(r, loc) {
   fl.rows = r.rows; fl.loc = loc;
@@ -1103,25 +1104,26 @@ function flRender(r, loc) {
   $('flOut').innerHTML = `<div class="tiles">${tile('Safe to retry', r.counts.retry.toLocaleString(), 'Temporary carrier problems')}${tile('Check first', r.counts.check.toLocaleString(), 'Reason not recognised')}${tile("Don't retry", r.counts.skip.toLocaleString(), 'Opt-outs, landlines, bad numbers, spam blocks')}${tile('Left out', ((r.reached || 0) + (r.replied || 0) + (r.dnd || 0)).toLocaleString(), gone || 'Reached, replied or DND')}</div>
     ${r.truncated ? note('warn', 'alert', 'This window has a lot of texts, so only the newest 200,000 were checked. Pick a shorter window to see the rest.') : ''}
     <div class="btnrow" style="margin-top:8px"><button class="btn lg" id="flSend">Resend</button><button class="btn tinted lg" id="flStop" hidden>Stop</button><a class="btn tinted lg" id="flCsv" href="/api/failed/${encodeURIComponent(fl.id)}/results.csv">Export CSV</a><span class="status" id="flSendStatus" style="margin:0"></span></div>
-    <div class="gh"><span>${rows.length.toLocaleString()} contact${rows.length === 1 ? '' : 's'} with a failed text${rows.length < (r.counts.retry + r.counts.check + r.counts.skip + (r.dnd || 0)) ? ' (showing the newest 1,000)' : ''}</span><span class="end" style="font-weight:400"><button class="btn sm plain" id="flAll">Select all retryable</button><button class="btn sm plain" id="flNone">Clear</button></span></div>
+    <div class="gh"><span>${rows.length.toLocaleString()} contact${rows.length === 1 ? '' : 's'} with a failed text${rows.length < (r.counts.retry + r.counts.check + r.counts.skip + (r.dnd || 0)) ? ' (showing the newest 1,000)' : ''}</span><span class="end" style="font-weight:400"><button class="btn sm plain" id="flAll">Select all</button><button class="btn sm plain" id="flSafe">Only safe to retry</button><button class="btn sm plain" id="flNone">Clear</button></span></div>
     <div class="grp people" id="flList">${rows.map((x) => flRow(x, loc)).join('')}</div>
     <p class="status" style="margin-top:10px">Each text is resent exactly as it was written, from the number it was first sent from, about two a second. Only the latest failed text per contact is resent.</p>`;
   fl.armed = false; clearTimeout(fl.armT);
   const count = () => { fl.armed = false; $('flSend').classList.remove('danger'); const n = document.querySelectorAll('.flPick:checked').length; $('flSend').textContent = n ? `Resend ${n} text${n === 1 ? '' : 's'}` : 'Resend'; $('flSend').disabled = !n || fl.sending; };
   $('flList').onchange = count;
-  $('flAll').onclick = () => { document.querySelectorAll('.flPick:not(:disabled)').forEach((b) => { const x = fl.rows.find((y) => y.contactId === b.value); b.checked = x && x.verdict === 'retry'; }); count(); };
+  $('flAll').onclick = () => { document.querySelectorAll('.flPick:not(:disabled)').forEach((b) => { b.checked = true; }); count(); };
+  $('flSafe').onclick = () => { document.querySelectorAll('.flPick:not(:disabled)').forEach((b) => { const x = fl.rows.find((y) => y.contactId === b.value); b.checked = !!x && x.verdict === 'retry'; }); count(); };
   $('flNone').onclick = () => { document.querySelectorAll('.flPick').forEach((b) => { b.checked = false; }); count(); };
-  $('flSend').onclick = flSend;
+  $('flSend').onclick = () => flSend();
   count();
 }
-async function flSend() {
+async function flSend(direct) {
   if (fl.sending) return;
-  const ids = [...document.querySelectorAll('.flPick:checked')].map((b) => b.value);
+  const ids = Array.isArray(direct) ? direct : [...document.querySelectorAll('.flPick:checked')].map((b) => b.value);
   if (!ids.length) return;
   const checkFirst = ids.filter((id) => (fl.rows.find((x) => x.contactId === id) || {}).verdict === 'check').length;
   // Two-step button instead of a browser dialog: the first click arms it, the second sends.
   const btn = $('flSend');
-  if (!fl.armed) {
+  if (!Array.isArray(direct) && !fl.armed) {
     fl.armed = true;
     btn.textContent = `Click again to resend ${ids.length}`;
     btn.classList.add('danger');
@@ -1158,6 +1160,41 @@ async function flSend() {
   }
 }
 $('flRun').onclick = flRun;
+// Full conversation for a failed-send contact, in the same sheet the Unanswered tab uses.
+async function flOpenConvo(contactId) {
+  const row = fl.rows.find((x) => x.contactId === contactId); if (!row) return;
+  const seq = ++cvSeq; cvCid = null;
+  $('cvAv').innerHTML = RGS.avatarHtml(row.name || row.to || '?', 'round');
+  $('cvName').textContent = row.name || row.to || 'Unknown';
+  $('cvSub').textContent = [row.name ? row.to : '', (row.code ? row.code + ' · ' : '') + row.reason].filter(Boolean).join(' · ');
+  $('cvOpen').innerHTML = I('external'); $('cvOpen').hidden = !row.conversationId; if (row.conversationId) $('cvOpen').href = convoUrl(fl.loc, row.conversationId);
+  $('cvMark').hidden = true; $('cvOpps').hidden = true; $('cvErr').hidden = true; $('cvComposer').innerHTML = '';
+  $('cvThread').innerHTML = '<div class="sys"><span class="spin"></span> Loading the conversation…</div>';
+  $('cvSheet').classList.add('open');
+  try {
+    const d = await api(`/api/failed/${encodeURIComponent(fl.id)}/conversation/${encodeURIComponent(contactId)}`);
+    if (seq !== cvSeq) return;
+    if (d.contact.conversationId) { row.conversationId = d.contact.conversationId; $('cvOpen').hidden = false; $('cvOpen').href = convoUrl(d.locationId, d.contact.conversationId); }
+    $('cvThread').innerHTML = (d.more ? '<div class="sys">Showing the latest 300 messages. Open in GHL for older ones.</div>' : '') + cvThread(d.messages);
+    $('cvThread').scrollTop = $('cvThread').scrollHeight;
+    flSheetFoot(row);
+  } catch (e) { if (seq === cvSeq) $('cvThread').innerHTML = `<div class="sys" style="color:var(--red)">${esc(e.message)}</div>`; }
+}
+function flSheetFoot(row) {
+  const el = $('cvComposer');
+  const can = row.verdict !== 'skip' && !row.dnd && !(row.resent && row.resent.ok);
+  const why = row.dnd ? 'On Do Not Disturb, so this text won\'t be resent.' : row.verdict === 'skip' ? `Not resent: ${row.reason}.` : row.resent && row.resent.ok ? 'Already resent.' : row.verdict === 'check' ? 'Failed for a reason we don\'t recognise. Read the thread before resending.' : 'Temporary failure. Safe to resend.';
+  el.innerHTML = `<div class="note-sm">${esc(why)}</div>${can ? '<button class="btn" id="cvResend">Resend this text</button>' : ''}`;
+  if (can) $('cvResend').onclick = async () => {
+    $('cvResend').disabled = true; $('cvResend').textContent = 'Sending…';
+    await flSend([row.contactId]);
+    const now = fl.rows.find((x) => x.contactId === row.contactId) || row;
+    if (now.resent && now.resent.ok) $('cvThread').insertAdjacentHTML('beforeend', msgHtml({ direction: 'outbound', type: 'sms', body: now.body, at: new Date().toISOString() }));
+    $('cvThread').scrollTop = $('cvThread').scrollHeight;
+    flSheetFoot(now);
+  };
+}
+document.addEventListener('click', (e) => { const n = e.target.closest('[data-flopen]'); if (n) { e.preventDefault(); flOpenConvo(n.dataset.flopen); } });
 // Re-order the current check without running it again; marks and replies made so far are kept.
 async function unResort(sort) {
   un.sort = sort; try { localStorage.setItem('bnrf-un-sort', sort); } catch (e) {}
@@ -1214,7 +1251,7 @@ async function openConvo(cid) {
   $('cvAv').innerHTML = RGS.avatarHtml(row.name || row.phone || '?', 'round');
   $('cvName').textContent = row.name || row.phone || row.email || 'Unknown';
   $('cvSub').textContent = [row.phone, row.email].filter(Boolean).join(' · ');
-  $('cvOpen').innerHTML = I('external'); $('cvOpen').href = convoUrl(curLoc()?.locationId || '', cid);
+  $('cvOpen').innerHTML = I('external'); $('cvOpen').hidden = false; $('cvOpen').href = convoUrl(curLoc()?.locationId || '', cid);
   $('cvThread').innerHTML = '<div class="sys"><span class="spin"></span> Loading the conversation…</div>';
   $('cvErr').hidden = true; $('cvComposer').innerHTML = ''; $('cvOpps').hidden = true;
   $('cvSheet').classList.add('open');
