@@ -165,6 +165,7 @@
     <div class="seg" id="modes">
       <button class="on" data-mode="finder" id="tabFinder">No-reply finder</button>
       <button data-mode="unanswered" id="tabUnanswered">Unanswered replies</button>
+      <button data-mode="failed" id="tabFailed">Failed sends</button>
       <button data-mode="auto" id="tabAuto">Automatic</button>
       <button data-mode="campaign" id="tabCampaign" hidden>Offer campaign</button>
     </div>
@@ -241,6 +242,18 @@
       </div>
       <div class="btnrow"><button class="btn lg" id="unRun">Check now</button><span class="status" id="unStatus" style="margin:0"></span></div>
       <div id="unOut"></div>
+    </div>
+  </div>
+
+  <!-- ============ Failed sends ============ -->
+  <div class="pane" id="failPane" hidden>
+    <div class="inner">
+      <div class="page-head"><div><h1>Failed sends</h1><p>Texts that came back failed or undelivered, with the carrier's reason. Temporary problems can be resent; opt-outs, landlines, bad numbers and spam blocks never are. Anyone who has since been reached, replied or is on Do Not Disturb is left out.</p></div></div>
+      <div class="grp">
+        <div class="fr"><div class="lbl">Look back</div><div class="ctl"><select id="flDays"><option value="1">Last 24 hours</option><option value="3">Last 3 days</option><option value="7" selected>Last 7 days</option><option value="14">Last 14 days</option><option value="30">Last 30 days</option></select></div></div>
+      </div>
+      <div class="btnrow"><button class="btn lg" id="flRun">Find failed texts</button><span class="status" id="flStatus" style="margin:0"></span></div>
+      <div id="flOut"></div>
     </div>
   </div>
 
@@ -668,7 +681,7 @@ let mode = 'finder';
 function showTab(name) {
   mode = name;
   $('modes').querySelectorAll('button').forEach((x) => x.classList.toggle('on', x.dataset.mode === name));
-  $('mx').hidden = name !== 'finder'; $('autoPane').hidden = name !== 'auto'; $('unPane').hidden = name !== 'unanswered'; $('campaignTab').hidden = name !== 'campaign';
+  $('mx').hidden = name !== 'finder'; $('autoPane').hidden = name !== 'auto'; $('unPane').hidden = name !== 'unanswered'; $('failPane').hidden = name !== 'failed'; $('campaignTab').hidden = name !== 'campaign';
   ['days', 'detectBtn', 'scanBtn'].forEach((id) => { $(id).style.display = name === 'finder' ? '' : 'none'; });
   try { localStorage.setItem('bnrf-tab', name); } catch (e) {}
   if (name === 'campaign' && !cp.loaded) cpLoad();
@@ -1028,6 +1041,123 @@ async function unTag(total) {
   } finally { un.tagging = false; $('unTagBtn').disabled = false; }
 }
 $('unRun').onclick = unRun;
+
+// ---------- Failed sends ----------
+const fl = { id: null, seq: 0, rows: [], sending: false };
+const FL_LABEL = { retry: 'Safe to retry', check: 'Check first', skip: "Don't retry" };
+function flReset() {
+  fl.seq++; fl.id = null; fl.rows = []; fl.sending = false;
+  $('flStatus').textContent = ''; $('flRun').disabled = false;
+  const l = curLoc();
+  $('flOut').innerHTML = `<div class="empty" style="padding-top:40px">${RGS.glyph('message', '--t-red')}<b>${l ? 'Find texts that never arrived' : 'Pick a sub-account first'}</b>${l ? 'Checks every text sent from ' + esc(l.label) + ' in the window.' : 'Choose one in the sidebar.'}</div>`;
+}
+async function flRun() {
+  const c = creds();
+  if (!c.locationId) return RGS.toast('Pick a sub-account first', { error: true });
+  const seq = ++fl.seq;
+  $('flRun').disabled = true; $('flStatus').innerHTML = '<span class="spin"></span> Reading sent texts…'; $('flOut').innerHTML = '';
+  try {
+    const { id } = await post('/api/failed', { locationId: c.locationId, days: Number($('flDays').value) });
+    fl.id = id;
+    let r;
+    for (;;) {
+      await sleep(1200);
+      if (seq !== fl.seq) return;
+      r = await api('/api/failed/' + id);
+      if (r.status !== 'running') break;
+      $('flStatus').innerHTML = `<span class="spin"></span> Reading sent texts… ${r.scanned.toLocaleString()} so far`;
+    }
+    if (r.status === 'error') throw new Error(r.error || 'The check failed');
+    for (;;) { // Do Not Disturb contacts are never resent, so wait for that check before showing choices
+      if (r.dndDone) break;
+      $('flStatus').innerHTML = `<span class="spin"></span> Checking Do Not Disturb… ${r.dndChecked} of ${r.dndTotal}`;
+      await sleep(1200);
+      if (seq !== fl.seq) return;
+      r = await api('/api/failed/' + id);
+    }
+    $('flStatus').textContent = r.dndError ? 'Could not check Do Not Disturb: ' + r.dndError : '';
+    flRender(r, c.locationId);
+  } catch (e) {
+    if (seq !== fl.seq) return;
+    $('flStatus').textContent = ''; $('flOut').innerHTML = note('bad', 'alert', esc(e.message));
+  } finally { if (seq === fl.seq) $('flRun').disabled = false; }
+}
+function flRow(x, loc) {
+  const can = x.verdict !== 'skip' && !x.dnd && !(x.resent && x.resent.ok);
+  const tag = x.dnd ? '<span class="pill">Do Not Disturb</span>'
+    : x.resent ? (x.resent.ok ? '<span class="pill ok">Resent</span>' : `<span class="pill bad" title="${esc(x.resent.error || '')}">Resend failed</span>`)
+    : `<span class="pill ${x.verdict === 'retry' ? 'ok' : x.verdict === 'skip' ? 'bad' : ''}">${FL_LABEL[x.verdict]}</span>`;
+  const why = (x.code ? x.code + ' · ' : '') + x.reason;
+  return `<div class="li fl${can ? '' : ' done'}" data-ct="${esc(x.contactId)}"><label style="display:flex;align-items:center;gap:10px;flex:1;min-width:0;cursor:${can ? 'pointer' : 'default'}"><input type="checkbox" class="flPick" value="${esc(x.contactId)}" ${can && x.verdict === 'retry' ? 'checked' : ''} ${can ? '' : 'disabled'}><div class="main"><b class="nm">${esc(x.to || 'Unknown number')}</b><span class="sub"><span class="msg">${esc(x.body || (x.hasMedia ? 'Picture message' : '(empty)'))}</span></span><span class="sub" style="color:var(--sec)">${esc(why)}${x.failedCount > 1 ? ` · failed ${x.failedCount} times` : ''}</span></div></label><span class="end"><span class="ts" title="${esc(fmtWhen(x.ts))}">${esc(shortDay(x.ts))}</span><span class="re">${tag}</span>${x.conversationId ? `<a class="icon-btn" href="${convoUrl(loc, x.conversationId)}" target="_blank" rel="noopener" title="Open the conversation in GHL" style="color:var(--blue)">${I('external')}</a>` : ''}</span></div>`;
+}
+function flRender(r, loc) {
+  fl.rows = r.rows; fl.loc = loc;
+  const tile = (k, v, sec) => `<div class="tile"><div class="k">${k}</div><div class="v">${v}</div>${sec ? `<div class="sec" style="font-size:12px">${esc(sec)}</div>` : ''}</div>`;
+  const gone = [r.reached ? `${r.reached} reached since` : '', r.replied ? `${r.replied} replied since` : '', r.dnd ? `${r.dnd} on DND` : ''].filter(Boolean).join(' · ');
+  if (!r.rows.length) {
+    $('flOut').innerHTML = note('ok', 'check', `<b>No failed texts to deal with.</b> ${r.failedTotal ? `${r.failedTotal} failed in this window, but those contacts have been reached or replied since.` : `Every text in this window was delivered (${r.scanned.toLocaleString()} checked).`}`);
+    return;
+  }
+  const order = { retry: 0, check: 1, skip: 2 };
+  const rows = [...r.rows].sort((a, b) => (a.dnd - b.dnd) || (order[a.verdict] - order[b.verdict]) || (b.ts - a.ts));
+  $('flOut').innerHTML = `<div class="tiles">${tile('Safe to retry', r.counts.retry.toLocaleString(), 'Temporary carrier problems')}${tile('Check first', r.counts.check.toLocaleString(), 'Reason not recognised')}${tile("Don't retry", r.counts.skip.toLocaleString(), 'Opt-outs, landlines, bad numbers, spam blocks')}${tile('Left out', ((r.reached || 0) + (r.replied || 0) + (r.dnd || 0)).toLocaleString(), gone || 'Reached, replied or DND')}</div>
+    ${r.truncated ? note('warn', 'alert', 'This window has a lot of texts, so only the newest 200,000 were checked. Pick a shorter window to see the rest.') : ''}
+    <div class="btnrow" style="margin-top:8px"><button class="btn lg" id="flSend">Resend</button><button class="btn tinted lg" id="flStop" hidden>Stop</button><a class="btn tinted lg" id="flCsv" href="/api/failed/${encodeURIComponent(fl.id)}/results.csv">Export CSV</a><span class="status" id="flSendStatus" style="margin:0"></span></div>
+    <div class="gh"><span>${rows.length.toLocaleString()} contact${rows.length === 1 ? '' : 's'} with a failed text${rows.length < (r.counts.retry + r.counts.check + r.counts.skip + (r.dnd || 0)) ? ' (showing the newest 1,000)' : ''}</span><span class="end" style="font-weight:400"><button class="btn sm plain" id="flAll">Select all retryable</button><button class="btn sm plain" id="flNone">Clear</button></span></div>
+    <div class="grp people" id="flList">${rows.map((x) => flRow(x, loc)).join('')}</div>
+    <p class="status" style="margin-top:10px">Each text is resent exactly as it was written, from the number it was first sent from, about two a second. Only the latest failed text per contact is resent.</p>`;
+  fl.armed = false; clearTimeout(fl.armT);
+  const count = () => { fl.armed = false; $('flSend').classList.remove('danger'); const n = document.querySelectorAll('.flPick:checked').length; $('flSend').textContent = n ? `Resend ${n} text${n === 1 ? '' : 's'}` : 'Resend'; $('flSend').disabled = !n || fl.sending; };
+  $('flList').onchange = count;
+  $('flAll').onclick = () => { document.querySelectorAll('.flPick:not(:disabled)').forEach((b) => { const x = fl.rows.find((y) => y.contactId === b.value); b.checked = x && x.verdict === 'retry'; }); count(); };
+  $('flNone').onclick = () => { document.querySelectorAll('.flPick').forEach((b) => { b.checked = false; }); count(); };
+  $('flSend').onclick = flSend;
+  count();
+}
+async function flSend() {
+  if (fl.sending) return;
+  const ids = [...document.querySelectorAll('.flPick:checked')].map((b) => b.value);
+  if (!ids.length) return;
+  const checkFirst = ids.filter((id) => (fl.rows.find((x) => x.contactId === id) || {}).verdict === 'check').length;
+  // Two-step button instead of a browser dialog: the first click arms it, the second sends.
+  const btn = $('flSend');
+  if (!fl.armed) {
+    fl.armed = true;
+    btn.textContent = `Click again to resend ${ids.length}`;
+    btn.classList.add('danger');
+    $('flSendStatus').textContent = `Each contact gets their original text again, from the same number.${checkFirst ? ` ${checkFirst} failed for a reason we don't recognise.` : ''}`;
+    clearTimeout(fl.armT); fl.armT = setTimeout(() => { fl.armed = false; btn.classList.remove('danger'); $('flList')?.onchange(); $('flSendStatus').textContent = ''; }, 6000);
+    return;
+  }
+  fl.armed = false; clearTimeout(fl.armT); btn.classList.remove('danger');
+  const seq = fl.seq;
+  fl.sending = true; $('flSend').disabled = true; $('flStop').hidden = false;
+  let jobId;
+  try {
+    ({ jobId } = await post(`/api/failed/${encodeURIComponent(fl.id)}/resend`, { contactIds: ids }));
+    $('flStop').onclick = () => { post(`/api/resend/${jobId}/stop`, {}).catch(() => {}); $('flStop').disabled = true; };
+    let j;
+    for (;;) {
+      await sleep(1000); if (seq !== fl.seq) return;
+      j = await api('/api/resend/' + jobId);
+      $('flSendStatus').innerHTML = `<span class="spin"></span> Resent ${j.sent} of ${j.total}${j.failed ? ` · ${j.failed} failed` : ''}`;
+      if (j.status !== 'running') break;
+    }
+    if (j.status === 'error') throw new Error(j.error);
+    fl.lastMsg = `${j.status === 'stopped' ? 'Stopped. ' : ''}Resent ${j.sent} of ${j.total}${j.failed ? ` · ${j.failed} failed (see the CSV)` : ''}`;
+    RGS.toast(`Resent ${j.sent} text${j.sent === 1 ? '' : 's'}`, { error: !j.sent });
+  } catch (e) {
+    $('flSendStatus').textContent = ''; RGS.toast(e.message, { error: true });
+  } finally {
+    if (seq === fl.seq) {
+      fl.sending = false; $('flStop').hidden = true; $('flStop').disabled = false;
+      try { const r = await api('/api/failed/' + fl.id); if (r.status === 'done') flRender(r, fl.loc); } catch (e) {}
+      if (fl.lastMsg && $('flSendStatus')) $('flSendStatus').textContent = fl.lastMsg;
+      fl.lastMsg = '';
+    }
+  }
+}
+$('flRun').onclick = flRun;
 // Re-order the current check without running it again; marks and replies made so far are kept.
 async function unResort(sort) {
   un.sort = sort; try { localStorage.setItem('bnrf-un-sort', sort); } catch (e) {}
@@ -1233,6 +1363,7 @@ function onLocationChanged() {
   clearInterval(schedPoll); clearInterval(cp.poll); cp.loaded = false;
   startState();
   unReset();
+  flReset();
   renderSchedule(null, null, false);
   loadSchedule();
   if (mode === 'campaign') cpLoad();
@@ -1243,7 +1374,7 @@ RGS.ready.then(() => {
   $('dGlyph').innerHTML = I('message'); $('sheetGl').innerHTML = I('filter');
   $('backBtn').innerHTML = I('left') + 'Blasts';
   let saved = 'finder'; try { saved = localStorage.getItem('bnrf-tab') || 'finder'; } catch (e) {}
-  showTab(['auto', 'unanswered'].includes(saved) ? saved : 'finder');
+  showTab(['auto', 'unanswered', 'failed'].includes(saved) ? saved : 'finder');
   RGS.onLocation(onLocationChanged);
   onLocationChanged();
 });
