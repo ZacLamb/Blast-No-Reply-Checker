@@ -395,6 +395,7 @@ let scanId = null, blasts = [], picked = null, pickedIdx = -1, tagging = false, 
 async function api(url, opts) {
   const res = await fetch(url, { credentials: 'same-origin', ...(opts || {}) });
   const data = await res.json().catch(() => ({}));
+  if ((res.status === 401 || res.status === 402) && window.RGS && RGS.embedded && RGS.embedded()) throw new Error(res.status === 401 ? 'This page has expired. Close it and open Blast Follow-Up again from the menu.' : 'Blast Follow-Up subscription is not active.');
   if (res.status === 401 || res.status === 402) { window.location.href = data.login || data.subscribe || window.HUB_URL; throw new Error('Redirecting…'); }
   if (!res.ok) throw new Error(data.error || ('Request failed (' + res.status + ')'));
   return data;

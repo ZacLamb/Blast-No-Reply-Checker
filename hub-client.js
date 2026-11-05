@@ -33,10 +33,18 @@ module.exports = function hubClient({ toolSlug }) {
     return r.json();
   }
 
+  // A hub session (cookie or Bearer), or an "inside HighLevel" token: the tool opened from a sub-account's
+  // menu, where cookies don't reach. That token is for this tool and one sub-account only.
   function sessionFrom(req) {
-    const raw = req.cookies?.[COOKIE] || (req.get('authorization') || '').replace(/^Bearer\s+/i, '');
+    const bearer = (req.get('authorization') || '').replace(/^Bearer\s+/i, '');
+    const raw = req.cookies?.[COOKIE] || bearer;
     if (!raw) return null;
-    try { return jwt.verify(raw, SECRET, { issuer: 'rgs-hub' }); } catch { return null; }
+    try { return jwt.verify(raw, SECRET, { issuer: 'rgs-hub' }); } catch { /* not a hub session */ }
+    if (!bearer) return null;
+    try {
+      const p = jwt.verify(bearer, `${SECRET}:embed`, { issuer: 'rgs-embed' });
+      return p.tool === toolSlug && p.loc ? { uid: p.uid, embedLoc: p.loc } : null;
+    } catch { return null; }
   }
 
   // Entitlements + connections for the user; cached a minute.
@@ -53,6 +61,11 @@ module.exports = function hubClient({ toolSlug }) {
     let p;
     try { p = await profile(s.uid); } catch (e) { if (e.status === 404) return { status: 401 }; throw e; } // account deleted
     req.hubUser = { id: p.user.id, email: p.user.email, isAdmin: p.user.is_admin, tools: p.tools, connections: p.connections };
+    if (s.embedLoc) { // inside HighLevel: only the sub-account it was opened from
+      req.hubUser.embedded = true;
+      req.hubUser.connections = p.connections.filter((c) => c.location_id === s.embedLoc);
+      if (!req.hubUser.connections.length) return { status: 401 };
+    }
     if (!p.tools.includes(toolSlug) && !p.user.is_admin) return { status: 402 };
     return { status: 200 };
   }
