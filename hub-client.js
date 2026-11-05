@@ -33,19 +33,29 @@ module.exports = function hubClient({ toolSlug }) {
     return r.json();
   }
 
-  // A hub session (cookie or Bearer), or an "inside HighLevel" token: the tool opened from a sub-account's
-  // menu, where cookies don't reach. That token is for this tool and one sub-account only.
-  function sessionFrom(req) {
-    const bearer = (req.get('authorization') || '').replace(/^Bearer\s+/i, '');
-    const raw = req.cookies?.[COOKIE] || bearer;
-    if (!raw) return null;
-    try { return jwt.verify(raw, SECRET, { issuer: 'rgs-hub' }); } catch { /* not a hub session */ }
-    if (!bearer) return null;
+  // "Inside HighLevel": the tool opened from a sub-account's menu (RGS dashboard > Inside HighLevel). The hub
+  // hands it a short-lived token for this tool and one sub-account. The page sends it as a Bearer header, and
+  // POST /embed/session also sets it as a partitioned cookie so page links and downloads inside the frame work.
+  const EMBED_COOKIE = 'rgs_embed';
+  function embedClaims(raw) {
     try {
-      const p = jwt.verify(bearer, `${SECRET}:embed`, { issuer: 'rgs-embed' });
+      const p = jwt.verify(raw, `${SECRET}:embed`, { issuer: 'rgs-embed' });
       return p.tool === toolSlug && p.loc ? { uid: p.uid, embedLoc: p.loc } : null;
     } catch { return null; }
   }
+  function sessionFrom(req) {
+    const bearer = (req.get('authorization') || '').replace(/^Bearer\s+/i, '');
+    const raw = req.cookies?.[COOKIE] || bearer;
+    if (raw) { try { return jwt.verify(raw, SECRET, { issuer: 'rgs-hub' }); } catch { /* not a hub session */ } }
+    return (bearer && embedClaims(bearer)) || (req.cookies?.[EMBED_COOKIE] && embedClaims(req.cookies[EMBED_COOKIE])) || null;
+  }
+  function embedSession(req, res) {
+    const raw = (req.get('authorization') || '').replace(/^Bearer\s+/i, '');
+    if (!embedClaims(raw)) return res.status(401).json({ error: 'expired' });
+    res.append('Set-Cookie', `${EMBED_COOKIE}=${raw}; Path=/; Max-Age=7200; HttpOnly; Secure; SameSite=None; Partitioned`);
+    res.json({ ok: true });
+  }
+  const EXPIRED_PAGE = '<!doctype html><meta charset="utf-8"><p style="font:15px system-ui,sans-serif;color:#6B7280;text-align:center;padding:48px 20px">This page has expired. Close it and open the tool again from the menu.</p>';
 
   // Entitlements + connections for the user; cached a minute.
   async function profile(userId) {
@@ -88,6 +98,7 @@ module.exports = function hubClient({ toolSlug }) {
   async function requireToolPage(req, res, next) {
     try {
       const { status } = await resolve(req);
+      if (status === 401 && req.get('sec-fetch-dest') === 'iframe') return res.status(401).type('html').send(EXPIRED_PAGE);
       if (status === 401) return res.redirect(loginUrl(req));
       if (status === 402) return res.redirect(`${HUB_URL}/app?tool=${toolSlug}`);
     } catch (e) { hubDown(e); return res.status(502).type('text').send(HUB_DOWN); }
@@ -134,5 +145,5 @@ module.exports = function hubClient({ toolSlug }) {
     res.json({ email: u.email, connections: u.connections.map(({ location_id, label }) => ({ locationId: location_id, label })), hubUrl: HUB_URL });
   }
 
-  return { requireTool, requireToolPage, credentials, credentialsFor, entitledUsers, reportTokenError, me, HUB_URL };
+  return { requireTool, requireToolPage, embedSession, credentials, credentialsFor, entitledUsers, reportTokenError, me, HUB_URL };
 };

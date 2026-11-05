@@ -35,3 +35,16 @@ test('a normal hub session still works', async () => {
   assert.strictEqual((await run(req)).status, 200);
   assert.strictEqual(req.hubUser.connections.length, 2);
 });
+
+test('/embed/session turns a valid embed token into a partitioned cookie; the cookie then signs in', async () => {
+  const tok = jwt.sign({ uid: 7, loc: 'LOC1', tool: 'blast-tools' }, 'sekret:embed', { issuer: 'rgs-embed', expiresIn: '1h' });
+  const out = await new Promise((resolve) => {
+    const res = { headers: {}, append(k, v) { this.headers[k] = v; }, status(c) { this.c = c; return this; }, json(b) { resolve({ status: this.c || 200, headers: this.headers, body: b }); } };
+    hub.embedSession(reqWith('Bearer ' + tok), res);
+  });
+  assert.strictEqual(out.status, 200);
+  assert.match(out.headers['Set-Cookie'], /^rgs_embed=.+; Path=\/; Max-Age=7200; HttpOnly; Secure; SameSite=None; Partitioned$/);
+  const req = { cookies: { rgs_embed: tok }, get: () => '', protocol: 'https', originalUrl: '/x' };
+  assert.strictEqual((await run(req)).status, 200);
+  assert.deepStrictEqual(req.hubUser.connections.map((c) => c.location_id), ['LOC1']);
+});

@@ -572,6 +572,7 @@ app.get('/app', hub.requireToolPage, (req, res) => res.sendFile(path.join(__dirn
 // Inside HighLevel (opened from a sub-account's menu): the same page, signed in by the token in its address
 // (#rgs-embed=...), which the page sends with every API call. The page itself holds no data.
 app.get('/embed', (req, res) => { res.set('Cache-Control', 'no-store'); res.sendFile(path.join(__dirname, 'public', 'app.html')); });
+app.post('/embed/session', hub.embedSession);
 app.get('/config.js', (req, res) => res.type('application/javascript').send(`window.HUB_URL=${JSON.stringify(hub.HUB_URL)};window.TOOL_SLUG="blast-tools";`));
 app.get('/ui/:file(rgs-ui.css|rgs-shell.js)', (req, res) => res.redirect(302, `${hub.HUB_URL}/ui/${req.params.file}`));
 app.use(express.static(path.join(__dirname, 'public'), { index: false }));
