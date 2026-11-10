@@ -563,6 +563,30 @@ app.use((req, res, next) => {
   res.redirect(301, `https://${want}${req.originalUrl}`);
 });
 
+// The hub calls these for the "Text all numbers" buttons inside HighLevel (Power-Ups). The hub has
+// already checked the user's key, that they have Blast Follow-Up, and that the sub-account is theirs.
+// Mounted before the app-wide 100kb body parser: a big ticked selection is a long list of IDs.
+function fromHub(req, res, next) {
+  const want = Buffer.from(String(process.env.HUB_SERVICE_KEY || ''));
+  const got = Buffer.from(String(req.get('x-hub-service-key') || ''));
+  if (!want.length || want.length !== got.length || !crypto.timingSafeEqual(want, got)) return res.status(401).json({ error: 'Not the hub.' });
+  if (!msms) return res.status(503).json(MSMS_OFF);
+  const owner = String(req.body?.owner || req.query.owner || ''), loc = String(req.body?.locationId || req.query.locationId || '');
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(owner) || !/^[A-Za-z0-9]{2,40}$/.test(loc)) return res.status(400).json({ error: 'owner and locationId are required.' });
+  req.msmsOwner = owner; req.msmsLoc = loc;
+  next();
+}
+app.post('/internal/multi-sms/queue', express.json({ limit: '1mb' }), fromHub, wrap(async (req, res) => {
+  try {
+    const b = req.body || {};
+    res.json(await msms.queueBulk(req.msmsOwner, req.msmsLoc, { contactIds: b.contactIds, search: b.search, message: b.message, mode: b.mode, fromNumber: b.fromNumber, source: b.source, expected: b.expected }));
+  } catch (e) {
+    if (!e.status) throw e;
+    res.status(e.status).json({ error: e.message });
+  }
+}));
+app.post('/internal/multi-sms/status', express.json({ limit: '4kb' }), fromHub, wrap(async (req, res) => res.json(await msms.status(req.msmsOwner, req.msmsLoc))));
+
 app.use(express.json({ limit: '100kb' }));
 app.use(cookieParser());
 
