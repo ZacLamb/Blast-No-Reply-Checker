@@ -101,6 +101,19 @@ function parseHook(body) {
   };
 }
 
+// From inside HighLevel: the contact list's own filter (what its "Select all" means), copied from the
+// page's search request. Only the filter and the search box text are kept; paging and sort are ours.
+const MAX_BULK = Math.max(1, Number(process.env.MSMS_MAX_BULK || 50000));
+function cleanSearch(search) {
+  const s = search || {};
+  const filters = Array.isArray(s.filters) ? s.filters : [];
+  if (JSON.stringify(filters).length > 20000) return null;
+  const query = typeof s.query === 'string' ? s.query.trim().slice(0, 200) : '';
+  return { filters, ...(query ? { query } : {}) };
+}
+// "+1 (617) 944-2522" → E.164 for the From line, or null.
+const cleanFrom = (v) => (v ? e164(v) : null);
+
 // ---------- queue + worker ----------
 
 function create({ pool, ghl, hub, CONTACTS_VERSION, CONVERSATIONS_VERSION, log = console }) {
@@ -115,6 +128,17 @@ function create({ pool, ghl, hub, CONTACTS_VERSION, CONVERSATIONS_VERSION, log =
       contact_id TEXT NOT NULL, message TEXT NOT NULL, mode TEXT NOT NULL, live BOOLEAN NOT NULL,
       status TEXT NOT NULL DEFAULT 'queued',       -- queued | done | skipped | failed
       note TEXT, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), done_at TIMESTAMPTZ)`);
+    await pool.query('ALTER TABLE msms_requests ADD COLUMN IF NOT EXISTS contact_name TEXT');   // shown in the log, also for skipped contacts
+    await pool.query('ALTER TABLE msms_requests ADD COLUMN IF NOT EXISTS from_number TEXT');    // send from this line (HighLevel's From picker)
+    await pool.query('ALTER TABLE msms_requests ADD COLUMN IF NOT EXISTS batch_id BIGINT');
+    // One click in HighLevel = one batch. A "Select all" batch starts as 'expanding': the worker pages
+    // through the list's filter and queues a request per contact, then it's 'queued'.
+    await pool.query(`CREATE TABLE IF NOT EXISTS msms_batches (
+      id BIGSERIAL PRIMARY KEY, owner TEXT NOT NULL, location_id TEXT NOT NULL, source TEXT NOT NULL,
+      search JSONB, message TEXT NOT NULL, mode TEXT NOT NULL, from_number TEXT, live BOOLEAN NOT NULL,
+      status TEXT NOT NULL,                          -- expanding | queued | failed
+      expected INT, found INT NOT NULL DEFAULT 0, cursor JSONB, note TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now())`);
     await pool.query('CREATE INDEX IF NOT EXISTS msms_requests_queue ON msms_requests (location_id, id) WHERE status = \'queued\'');
     await pool.query(`CREATE TABLE IF NOT EXISTS msms_sends (
       id BIGSERIAL PRIMARY KEY, request_id BIGINT NOT NULL, owner TEXT NOT NULL, location_id TEXT NOT NULL,
@@ -162,11 +186,18 @@ function create({ pool, ghl, hub, CONTACTS_VERSION, CONVERSATIONS_VERSION, log =
 
   // ---- worker: one loop per sub-account, oldest first, at GHL's pace (ghl() throttles per token) ----
   const running = new Set();
+  const expanding = new Set();
   const fieldKeys = new Map();   // locationId -> { at, map: { fieldId: key } }
   let timer = null;
   function kick() { if (!timer) timer = setTimeout(async () => { timer = null; await tick().catch((e) => log.error('[msms] tick', e)); }, 200); }
 
   async function tick() {
+    const { rows: bs } = await pool.query(`SELECT id FROM msms_batches WHERE status='expanding' ORDER BY id`);
+    for (const { id } of bs) {
+      if (expanding.has(id)) continue;
+      expanding.add(id);
+      expand(id).catch((e) => log.error('[msms] expand', id, e.message)).finally(() => { expanding.delete(id); kick(); });
+    }
     const { rows } = await pool.query(`SELECT DISTINCT location_id, owner FROM msms_requests WHERE status='queued'`);
     for (const { location_id: loc, owner } of rows) {
       const k = `${owner}:${loc}`;
@@ -204,19 +235,20 @@ function create({ pool, ghl, hub, CONTACTS_VERSION, CONVERSATIONS_VERSION, log =
       try { contact = (await ghl(token, 'GET', `/contacts/${encodeURIComponent(r.contact_id)}`, CONTACTS_VERSION)).contact; }
       catch (e) { await done('failed', `Couldn't read the contact: ${e.message}`); if (e.status === 401 || e.status === 403) return; continue; }
       if (!contact) { await done('failed', 'Contact not found'); continue; }
+      const name = contact.contactName || [contact.firstName, contact.lastName].filter(Boolean).join(' ') || contact.companyName || contact.phone || null;
+      await pool.query('UPDATE msms_requests SET contact_name=$2 WHERE id=$1', [r.id, name]);
       const dnd = onDnd(contact);
       if (dnd) { await done('skipped', `${dnd}: no numbers texted`); continue; }
       const numbers = numbersFor(contact, r.mode);
       if (!numbers.length) { await done('skipped', r.mode === 'additional' ? 'No additional numbers' : 'No valid phone numbers'); continue; }
       const text = render(r.message, contact, /\{\{/.test(r.message) ? await customKeys(token, loc) : {});
       const primary = phonesOf(contact).primary;
-      const name = contact.contactName || [contact.firstName, contact.lastName].filter(Boolean).join(' ') || null;
       let sent = 0, failed = 0, fatal = null;
       for (const number of numbers) {
         const row = { status: 'would_send', messageId: null, error: null };
         if (r.live && !fatal) {
           try {
-            const d = await ghl(token, 'POST', '/conversations/messages', CONVERSATIONS_VERSION, { type: 'SMS', contactId: r.contact_id, message: text, toNumber: number });
+            const d = await ghl(token, 'POST', '/conversations/messages', CONVERSATIONS_VERSION, { type: 'SMS', contactId: r.contact_id, message: text, toNumber: number, ...(r.from_number ? { fromNumber: r.from_number } : {}) });
             row.status = 'sent'; row.messageId = d.messageId || d.msg?.id || null; sent++;
           } catch (e) {
             row.status = 'failed'; row.error = String(e.message || e).replace(/^GHL returned \d+: /, '').slice(0, 300); failed++;
@@ -234,6 +266,80 @@ function create({ pool, ghl, hub, CONTACTS_VERSION, CONVERSATIONS_VERSION, log =
     }
   }
 
+  // ---- from inside HighLevel (via the hub's Power-Ups) ----
+  // contactIds: the rows ticked on the page. search: the list's filter, when "Select all" was used.
+  async function queueBulk(owner, loc, { contactIds, search, message, mode, fromNumber, source, expected }) {
+    owner = String(owner);
+    const text = String(message || '');
+    if (!text.trim()) throw Object.assign(new Error('Write a message first.'), { status: 400 });
+    if (text.length > 1600) throw Object.assign(new Error('Message is longer than 1,600 characters.'), { status: 400 });
+    const m = MODES.includes(mode) ? mode : 'all';
+    const from = cleanFrom(fromNumber);
+    const h = await hookFor(owner, loc);
+    const ids = [...new Set((Array.isArray(contactIds) ? contactIds : []).map(String).filter((x) => /^[A-Za-z0-9]{2,40}$/.test(x)))];
+    let srch = null;
+    if (!ids.length) {
+      srch = search ? cleanSearch(search) : null;
+      if (!srch) throw Object.assign(new Error('No contacts selected.'), { status: 400 });
+    }
+    if (ids.length > MAX_BULK) throw Object.assign(new Error(`That's more than ${MAX_BULK.toLocaleString('en-US')} contacts. Narrow the list down first.`), { status: 400 });
+    const exp = Number.isFinite(Number(expected)) ? Math.max(0, Math.floor(Number(expected))) : null;
+    if (srch && exp != null && exp > MAX_BULK) throw Object.assign(new Error(`That list has ${exp.toLocaleString('en-US')} contacts; the most one send can take is ${MAX_BULK.toLocaleString('en-US')}. Filter it down first.`), { status: 400 });
+    const { rows: [b] } = await pool.query(`INSERT INTO msms_batches (owner, location_id, source, search, message, mode, from_number, live, status, expected, found)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id`,
+      [owner, loc, String(source || 'ghl').slice(0, 40), srch, text, m, from, h.live, srch ? 'expanding' : 'queued', srch ? exp : ids.length, srch ? 0 : ids.length]);
+    if (ids.length) await insertRequests(b.id, h, owner, loc, ids, text, m, from);
+    kick();
+    return { batchId: b.id, live: h.live, queued: ids.length, expanding: !!srch };
+  }
+  async function insertRequests(batchId, h, owner, loc, ids, text, mode, from) {
+    await pool.query(`INSERT INTO msms_requests (hook_key, owner, location_id, contact_id, message, mode, live, from_number, batch_id)
+      SELECT $1,$2,$3,unnest($4::text[]),$5,$6,$7,$8,$9`, [h.key, owner, loc, ids, text, mode, h.live, from, batchId]);
+  }
+  // Page through the list's filter 500 at a time (searchAfter, so past HighLevel's 10,000 window).
+  async function expand(batchId) {
+    const { rows: [b] } = await pool.query('SELECT * FROM msms_batches WHERE id=$1', [batchId]);
+    if (!b || b.status !== 'expanding') return;
+    const fail = (note) => pool.query(`UPDATE msms_batches SET status='failed', note=$2 WHERE id=$1`, [batchId, String(note).slice(0, 300)]);
+    let token;
+    try { token = (await hub.credentialsFor(b.owner, b.location_id)).pit; }
+    catch (e) { return fail(`No access to this sub-account: ${e.message}`); }
+    const h = await hookFor(b.owner, b.location_id);
+    const s = b.search || {};
+    let cursor = b.cursor, found = b.found;
+    for (;;) {
+      let d;
+      try {
+        d = await ghl(token, 'POST', '/contacts/search', CONTACTS_VERSION, {
+          locationId: b.location_id, pageLimit: 500, filters: s.filters || [], ...(s.query ? { query: s.query } : {}),
+          sort: [{ field: 'date_added', direction: 'desc' }], ...(cursor ? { searchAfter: cursor } : {}),
+        });
+      } catch (e) { return fail(`Couldn't read the contact list: ${String(e.message || e).replace(/^GHL returned \d+: /, '')}`); }
+      const contacts = (d.contacts || []).filter((c) => c && c.id);
+      const ids = contacts.map((c) => c.id).slice(0, Math.max(0, MAX_BULK - found));
+      if (ids.length) await insertRequests(batchId, h, b.owner, b.location_id, ids, b.message, b.mode, b.from_number);
+      found += ids.length;
+      const last = contacts[contacts.length - 1];
+      cursor = last ? [new Date(last.dateAdded).getTime() || 0, last.id] : null;
+      const end = contacts.length < 500 || !last || found >= MAX_BULK;
+      await pool.query('UPDATE msms_batches SET found=$2, cursor=$3, status=$4, note=$5 WHERE id=$1',
+        [batchId, found, cursor ? JSON.stringify(cursor) : null, end ? 'queued' : 'expanding', end && found >= MAX_BULK ? `Stopped at the ${MAX_BULK.toLocaleString('en-US')}-contact limit` : null]);
+      if (ids.length) kick();
+      if (end) return;
+    }
+  }
+  // For the dialog in HighLevel: is this sub-account live, and how's the last send going?
+  async function status(owner, loc) {
+    const h = await hookFor(String(owner), loc);
+    const { rows: batches } = await pool.query(`SELECT b.id, b.source, b.status, b.expected, b.found, b.note, b.live, b.created_at,
+        count(r.*) FILTER (WHERE r.status='queued')::int AS queued, count(r.*) FILTER (WHERE r.status='done')::int AS done,
+        count(r.*) FILTER (WHERE r.status='skipped')::int AS skipped, count(r.*) FILTER (WHERE r.status='failed')::int AS failed
+      FROM msms_batches b LEFT JOIN msms_requests r ON r.batch_id=b.id
+      WHERE b.owner=$1 AND b.location_id=$2 AND b.created_at > now() - interval '3 days'
+      GROUP BY b.id ORDER BY b.id DESC LIMIT 5`, [String(owner), loc]);
+    return { live: h.live, maxBulk: MAX_BULK, batches };
+  }
+
   // ---- the tool page ----
   async function summary(owner, loc) {
     const hook = await hookFor(owner, loc);
@@ -247,7 +353,7 @@ function create({ pool, ghl, hub, CONTACTS_VERSION, CONVERSATIONS_VERSION, log =
     return { hookKey: hook.key, live: hook.live, requests: q, sends: s };
   }
   async function recent(owner, loc, limit = 200) {
-    const { rows: reqs } = await pool.query(`SELECT id, contact_id, mode, live, status, note, created_at, done_at, left(message, 160) AS message
+    const { rows: reqs } = await pool.query(`SELECT id, contact_id, contact_name, mode, live, status, note, created_at, done_at, left(message, 160) AS message
       FROM msms_requests WHERE owner=$1 AND location_id=$2 ORDER BY id DESC LIMIT $3`, [String(owner), loc, limit]);
     const ids = reqs.map((r) => r.id);
     const { rows: sends } = ids.length ? await pool.query('SELECT request_id, contact_name, number, is_primary, status, error, at FROM msms_sends WHERE request_id = ANY($1) ORDER BY id', [ids]) : { rows: [] };
@@ -271,7 +377,7 @@ function create({ pool, ghl, hub, CONTACTS_VERSION, CONVERSATIONS_VERSION, log =
   }
 
   setInterval(() => tick().catch(() => {}), 15000).unref?.();   // picks up anything left after a restart
-  return { init, receive, hookFor, setLive, rotate, summary, recent, sendsCsv, test, kick };
+  return { init, receive, hookFor, setLive, rotate, summary, recent, sendsCsv, test, kick, queueBulk, status };
 }
 
-module.exports = { create, e164, phonesOf, numbersFor, onDnd, render, parseHook, MODES };
+module.exports = { create, e164, phonesOf, numbersFor, onDnd, render, parseHook, cleanSearch, MODES };
