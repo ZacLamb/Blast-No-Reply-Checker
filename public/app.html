@@ -168,6 +168,7 @@
       <button data-mode="unanswered" id="tabUnanswered">Unanswered replies</button>
       <button data-mode="failed" id="tabFailed">Failed sends</button>
       <button data-mode="auto" id="tabAuto">Automatic</button>
+      <button data-mode="msms" id="tabMsms">Multi-number SMS</button>
       <button data-mode="campaign" id="tabCampaign" hidden>Offer campaign</button>
     </div>
     <span class="spacer"></span>
@@ -290,6 +291,39 @@
         <div class="gh">Recent runs</div>
         <div class="grp hist" id="schedHistory"></div>
       </div>
+    </div>
+  </div>
+
+  <!-- ============ Multi-number SMS ============ -->
+  <div class="pane" id="msmsPane" hidden>
+    <div class="inner">
+      <div class="page-head"><div><h1>Multi-number SMS</h1><p>HighLevel's bulk Send SMS and workflow texts only reach a contact's primary phone. Send the same text to their other numbers too: bulk-select contacts, add them to a workflow, and the workflow's webhook hands each one to us.</p></div></div>
+      <div class="grp">
+        <div class="fr"><div class="lbl">Live sending<small id="msLiveSub">Off: requests run as a dry run, logged as "would send". Nothing is texted.</small></div><div class="ctl"><label class="sw"><input id="msLive" type="checkbox"><i></i></label></div></div>
+      </div>
+      <div class="gh">1 · Webhook URL for this sub-account</div>
+      <div class="grp"><div class="fr" style="flex-wrap:wrap;gap:8px"><input id="msUrl" type="text" readonly style="flex:1 1 320px;font-family:var(--mono,monospace);font-size:12.5px"><button class="btn tinted sm" id="msCopy">Copy</button><button class="btn tinted sm" id="msRotate" title="Makes a new URL; the old one stops working">New URL</button></div></div>
+      <div class="gh">2 · In the workflow</div>
+      <div class="grp"><div class="fr" style="display:block;font-size:13px;line-height:1.55">
+        Add a <b>Custom Webhook</b> action: method <b>POST</b>, the URL above, content type <b>JSON</b>, and this body. Put your text in <code>message</code> (merge fields like <code>{{contact.first_name}}</code> work). <code>mode</code> is <b>all</b> (every number), <b>additional</b> (every number except the primary, pair it with a normal Send SMS step) or <b>primary</b>.
+        <pre id="msBody" style="margin:8px 0 0;background:var(--fill);border-radius:8px;padding:10px;font-size:12px;white-space:pre-wrap">{
+  "contactId": "{{contact.id}}",
+  "locationId": "{{location.id}}",
+  "message": "Hi {{contact.first_name}}, ...",
+  "mode": "additional"
+}</pre>
+        <div style="margin-top:8px"><button class="btn tinted sm" id="msCopyBody">Copy body</button></div>
+        <p class="sec" style="margin:10px 0 0;font-size:12.5px">Contacts on Do Not Disturb (or tagged STOP) are skipped on every number. Numbers are cleaned to +1… format, duplicates and invalid numbers are dropped, and texts go out at HighLevel's rate limit.</p></div></div>
+      <div class="gh">3 · Test one contact first</div>
+      <div class="grp">
+        <div class="fr"><div class="lbl">Contact<small>ID, or paste the contact's URL</small></div><div class="ctl"><input id="msTestContact" type="text" placeholder="Contact ID or URL"></div></div>
+        <div class="fr"><div class="lbl">Message</div><div class="ctl"><input id="msTestMsg" type="text" placeholder="Test from RGS Tools: reply 1 if you got this"></div></div>
+        <div class="fr"><div class="lbl">Numbers</div><div class="ctl"><select id="msTestMode"><option value="all">Every number</option><option value="additional">Only the additional numbers</option><option value="primary">Only the primary</option></select></div></div>
+        <div class="fr"><div class="lbl">Really send it<small>Off: shows which numbers would get it</small></div><div class="ctl"><label class="sw"><input id="msTestLive" type="checkbox"><i></i></label></div></div>
+      </div>
+      <div class="btnrow"><button class="btn lg" id="msTestGo">Run test</button><a class="btn tinted lg" id="msCsv" href="#">Download log (CSV)</a><span class="status" id="msStatus" style="margin:0"></span></div>
+      <div class="gh" id="msStats">Recent requests</div>
+      <div class="grp hist" id="msList"></div>
     </div>
   </div>
 
@@ -683,11 +717,50 @@ let mode = 'finder';
 function showTab(name) {
   mode = name;
   $('modes').querySelectorAll('button').forEach((x) => x.classList.toggle('on', x.dataset.mode === name));
-  $('mx').hidden = name !== 'finder'; $('autoPane').hidden = name !== 'auto'; $('unPane').hidden = name !== 'unanswered'; $('failPane').hidden = name !== 'failed'; $('campaignTab').hidden = name !== 'campaign';
+  $('mx').hidden = name !== 'finder'; $('autoPane').hidden = name !== 'auto'; $('msmsPane').hidden = name !== 'msms'; $('unPane').hidden = name !== 'unanswered'; $('failPane').hidden = name !== 'failed'; $('campaignTab').hidden = name !== 'campaign';
   ['days', 'detectBtn', 'scanBtn'].forEach((id) => { $(id).style.display = name === 'finder' ? '' : 'none'; });
   try { localStorage.setItem('bnrf-tab', name); } catch (e) {}
   if (name === 'campaign' && !cp.loaded) cpLoad();
+  if (name === 'msms') msLoad();
 }
+
+// ---------- Multi-number SMS ----------
+let msPoll = null;
+const MS_STATUS = { sent: ['Sent', 'ok'], would_send: ['Would send', ''], failed: ['Failed', 'bad'] };
+async function msLoad() {
+  clearTimeout(msPoll);
+  const c = creds(); if (!c.locationId) { $('msList').innerHTML = '<div class="li"><div class="main sec">Pick a sub-account in the sidebar.</div></div>'; return; }
+  let d;
+  try { d = await api('/api/multi-sms?locationId=' + encodeURIComponent(c.locationId)); }
+  catch (e) { $('msList').innerHTML = `<div class="li"><div class="main sec">${esc(e.message)}</div></div>`; return; }
+  $('msUrl').value = d.hookUrl; $('msLive').checked = d.live;
+  $('msLiveSub').textContent = d.live ? 'On: workflow requests text real numbers.' : 'Off: requests run as a dry run, logged as "would send". Nothing is texted.';
+  $('msCsv').href = '/api/multi-sms/sends.csv?locationId=' + encodeURIComponent(c.locationId);
+  const q = d.requests, s = d.sends;
+  $('msStats').textContent = `Last 7 days: ${s.sent} sent · ${s.failed} failed · ${s.would} dry-run · ${q.skipped7} contacts skipped${q.queued ? ` · ${q.queued} waiting` : ''}`;
+  $('msList').innerHTML = d.recent.length ? d.recent.map((r) => `<div class="li" style="display:block;padding:9px 14px"><div style="display:flex;gap:8px;align-items:baseline;flex-wrap:wrap"><b style="font-weight:550">${esc(r.sends[0]?.contact_name || r.contact_id)}</b><span class="sec" style="font-size:12px">${esc(fmtWhen(r.created_at))} · ${esc(r.mode)}${r.live ? '' : ' · dry run'}</span><span class="sec" style="margin-left:auto;font-size:12px">${esc(r.status === 'queued' ? 'Waiting…' : r.note || r.status)}</span></div>
+      ${r.sends.length ? `<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:5px">${r.sends.map((x) => { const [l, cls] = MS_STATUS[x.status] || [x.status, '']; return `<span class="pill ${cls}" title="${esc(x.error || '')}">${esc(x.number)}${x.is_primary ? ' · primary' : ''} · ${esc(l)}</span>`; }).join('')}</div>` : ''}</div>`).join('')
+    : '<div class="li"><div class="main sec">Nothing yet. Run a test, or add contacts to the workflow.</div></div>';
+  if (q.queued && mode === 'msms') msPoll = setTimeout(msLoad, 3000);
+}
+$('msLive').onchange = async () => {
+  const on = $('msLive').checked;
+  if (on && !confirm('Turn on live sending? Workflow requests will text every number they list. Run a test on one of your own contacts first.')) { $('msLive').checked = false; return; }
+  try { await post('/api/multi-sms/live', { locationId: creds().locationId, live: on }); msLoad(); } catch (e) { $('msLive').checked = !on; show($('msStatus'), e.message); }
+};
+$('msCopy').onclick = () => { navigator.clipboard.writeText($('msUrl').value); RGS.toast('Webhook URL copied'); };
+$('msCopyBody').onclick = () => { navigator.clipboard.writeText($('msBody').textContent); RGS.toast('Body copied'); };
+$('msRotate').onclick = async () => {
+  if (!confirm('Make a new webhook URL? Workflows using the old one stop working until you paste the new one.')) return;
+  try { const r = await post('/api/multi-sms/rotate', { locationId: creds().locationId }); $('msUrl').value = r.hookUrl; RGS.toast('New URL made'); } catch (e) { show($('msStatus'), e.message); }
+};
+$('msTestGo').onclick = async () => {
+  show($('msStatus'), '');
+  try {
+    await post('/api/multi-sms/test', { locationId: creds().locationId, contactId: $('msTestContact').value, message: $('msTestMsg').value, mode: $('msTestMode').value, live: $('msTestLive').checked });
+    RGS.toast($('msTestLive').checked ? 'Sending…' : 'Checking numbers…'); setTimeout(msLoad, 1200);
+  } catch (e) { show($('msStatus'), e.message); }
+};
 $('modes').querySelectorAll('button').forEach((b) => b.onclick = () => showTab(b.dataset.mode));
 
 // ---------- Schedule ----------
@@ -1405,6 +1478,7 @@ function onLocationChanged() {
   renderSchedule(null, null, false);
   loadSchedule();
   if (mode === 'campaign') cpLoad();
+  if (mode === 'msms') msLoad();
 }
 RGS.ready.then(() => {
   I = (n) => RGS.icon(n);
@@ -1412,7 +1486,7 @@ RGS.ready.then(() => {
   $('dGlyph').innerHTML = I('message'); $('sheetGl').innerHTML = I('filter');
   $('backBtn').innerHTML = I('left') + 'Blasts';
   let saved = 'finder'; try { saved = localStorage.getItem('bnrf-tab') || 'finder'; } catch (e) {}
-  showTab(['auto', 'unanswered', 'failed'].includes(saved) ? saved : 'finder');
+  showTab(['auto', 'unanswered', 'failed', 'msms'].includes(saved) ? saved : 'finder');
   RGS.onLocation(onLocationChanged);
   onLocationChanged();
 });

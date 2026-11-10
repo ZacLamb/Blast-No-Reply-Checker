@@ -392,10 +392,10 @@ async function runTagJob(job, token, contacts, tag) {
 // ---------- Schedule storage ----------
 // One schedule per sub-account. Postgres if DATABASE_URL is set, else a JSON file.
 
-let store;
+let store, pool = null;
 if (process.env.DATABASE_URL) {
   const { Pool } = require('pg');
-  const pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: process.env.PGSSL === 'require' ? { rejectUnauthorized: false } : undefined });
+  pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: process.env.PGSSL === 'require' ? { rejectUnauthorized: false } : undefined });
   store = {
     kind: 'postgres',
     async init() {
@@ -567,6 +567,12 @@ app.use(express.json({ limit: '100kb' }));
 app.use(cookieParser());
 
 app.get('/health', (req, res) => res.json({ ok: true, service: 'blast-tools' }));
+// The workflow's Webhook action posts here. No login: the secret key in the URL is the sub-account.
+app.post('/hooks/multi-sms/:key', wrap(async (req, res) => {
+  if (!msms) return res.status(503).json(MSMS_OFF);
+  const r = await msms.receive(req.params.key, req.body);
+  res.status(r.status).json(r.body);
+}));
 app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
 app.get('/app', hub.requireToolPage, (req, res) => res.sendFile(path.join(__dirname, 'public', 'app.html')));
 // Inside HighLevel (opened from a sub-account's menu): the same page, signed in by the token in its address
@@ -580,6 +586,43 @@ app.use(express.static(path.join(__dirname, 'public'), { index: false }));
 // Every API route needs a hub session + entitlement (or admin). 401/402 come back as JSON.
 app.use('/api', hub.requireTool);
 app.get('/api/me', hub.me);
+
+// ---------- Multi-Number SMS (see multi-sms.js) ----------
+const MSMS_OFF = { error: 'Multi-Number SMS needs the database (DATABASE_URL) on this service.' };
+const hookUrl = (req, key) => `${(process.env.PUBLIC_URL || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '')}/hooks/multi-sms/${key}`;
+async function msmsLoc(req, res) {
+  if (!msms) { res.status(503).json(MSMS_OFF); return null; }
+  const c = await creds(req, res);
+  return c ? c.locationId : null;
+}
+app.get('/api/multi-sms', wrap(async (req, res) => {
+  const loc = await msmsLoc(req, res); if (!loc) return;
+  const s = await msms.summary(req.hubUser.id, loc);
+  res.json({ ...s, hookUrl: hookUrl(req, s.hookKey), recent: await msms.recent(req.hubUser.id, loc, Number(req.query.limit) || 100) });
+}));
+app.post('/api/multi-sms/live', wrap(async (req, res) => {
+  const loc = await msmsLoc(req, res); if (!loc) return;
+  await msms.setLive(req.hubUser.id, loc, !!req.body.live);
+  res.json({ ok: true, live: !!req.body.live });
+}));
+app.post('/api/multi-sms/rotate', wrap(async (req, res) => {
+  const loc = await msmsLoc(req, res); if (!loc) return;
+  res.json({ hookUrl: hookUrl(req, await msms.rotate(req.hubUser.id, loc)) });
+}));
+app.post('/api/multi-sms/test', wrap(async (req, res) => {
+  const loc = await msmsLoc(req, res); if (!loc) return;
+  const contactId = String(req.body.contactId || '').trim().replace(/^.*\/contacts\/detail\//, '').replace(/[/?#].*$/, '');
+  const message = String(req.body.message || '').trim();
+  if (!contactId || !message) return res.status(400).json({ error: 'Enter a contact ID (or paste the contact\'s URL) and a message.' });
+  res.json({ queued: await msms.test(req.hubUser.id, loc, { contactId, message, mode: req.body.mode, live: !!req.body.live }) });
+}));
+app.get('/api/multi-sms/sends.csv', wrap(async (req, res) => {
+  const loc = await msmsLoc(req, res); if (!loc) return;
+  const rows = await msms.sendsCsv(req.hubUser.id, loc);
+  const cell = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+  res.type('text/csv').set('Content-Disposition', `attachment; filename="multi-number-sms-${loc}.csv"`)
+    .send(['Time,Contact ID,Contact,Number,Primary,Status,Error,Message ID,Mode,Message', ...rows.map((r) => [new Date(r.at).toISOString(), r.contact_id, r.contact_name, r.number, r.is_primary ? 'yes' : 'no', r.status, r.error, r.message_id, r.mode, r.message].map(cell).join(','))].join('\n'));
+}));
 
 // The offer-campaign module (campaign.js) is parked: not mounted until it is moved onto
 // hub credentials too. Its routes took a raw token in the body, so leaving it unmounted
@@ -1145,7 +1188,9 @@ setInterval(() => {
   for (const [id, j] of resendJobs) if (now - j.createdAt > KEEP_MS && j.status !== 'running') resendJobs.delete(id);
 }, 10 * 60 * 1000).unref();
 
-store.init().then(() => {
+// Multi-Number SMS keeps its queue and send log in Postgres, so it's off without DATABASE_URL.
+const msms = pool ? require('./multi-sms').create({ pool, ghl, hub, CONTACTS_VERSION, CONVERSATIONS_VERSION }) : null;
+store.init().then(() => msms && msms.init()).then(() => {
   console.log(`schedule storage: ${store.kind}`);
   setInterval(tick, TICK_MS).unref(); // tick() catches its own errors
   setTimeout(tick, 5000).unref();
