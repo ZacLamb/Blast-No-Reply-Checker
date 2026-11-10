@@ -115,6 +115,7 @@ function create({ pool, ghl, hub, CONTACTS_VERSION, CONVERSATIONS_VERSION, log =
       contact_id TEXT NOT NULL, message TEXT NOT NULL, mode TEXT NOT NULL, live BOOLEAN NOT NULL,
       status TEXT NOT NULL DEFAULT 'queued',       -- queued | done | skipped | failed
       note TEXT, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), done_at TIMESTAMPTZ)`);
+    await pool.query('ALTER TABLE msms_requests ADD COLUMN IF NOT EXISTS contact_name TEXT');   // shown in the log, also for skipped contacts
     await pool.query('CREATE INDEX IF NOT EXISTS msms_requests_queue ON msms_requests (location_id, id) WHERE status = \'queued\'');
     await pool.query(`CREATE TABLE IF NOT EXISTS msms_sends (
       id BIGSERIAL PRIMARY KEY, request_id BIGINT NOT NULL, owner TEXT NOT NULL, location_id TEXT NOT NULL,
@@ -204,13 +205,14 @@ function create({ pool, ghl, hub, CONTACTS_VERSION, CONVERSATIONS_VERSION, log =
       try { contact = (await ghl(token, 'GET', `/contacts/${encodeURIComponent(r.contact_id)}`, CONTACTS_VERSION)).contact; }
       catch (e) { await done('failed', `Couldn't read the contact: ${e.message}`); if (e.status === 401 || e.status === 403) return; continue; }
       if (!contact) { await done('failed', 'Contact not found'); continue; }
+      const name = contact.contactName || [contact.firstName, contact.lastName].filter(Boolean).join(' ') || contact.companyName || contact.phone || null;
+      await pool.query('UPDATE msms_requests SET contact_name=$2 WHERE id=$1', [r.id, name]);
       const dnd = onDnd(contact);
       if (dnd) { await done('skipped', `${dnd}: no numbers texted`); continue; }
       const numbers = numbersFor(contact, r.mode);
       if (!numbers.length) { await done('skipped', r.mode === 'additional' ? 'No additional numbers' : 'No valid phone numbers'); continue; }
       const text = render(r.message, contact, /\{\{/.test(r.message) ? await customKeys(token, loc) : {});
       const primary = phonesOf(contact).primary;
-      const name = contact.contactName || [contact.firstName, contact.lastName].filter(Boolean).join(' ') || null;
       let sent = 0, failed = 0, fatal = null;
       for (const number of numbers) {
         const row = { status: 'would_send', messageId: null, error: null };
@@ -247,7 +249,7 @@ function create({ pool, ghl, hub, CONTACTS_VERSION, CONVERSATIONS_VERSION, log =
     return { hookKey: hook.key, live: hook.live, requests: q, sends: s };
   }
   async function recent(owner, loc, limit = 200) {
-    const { rows: reqs } = await pool.query(`SELECT id, contact_id, mode, live, status, note, created_at, done_at, left(message, 160) AS message
+    const { rows: reqs } = await pool.query(`SELECT id, contact_id, contact_name, mode, live, status, note, created_at, done_at, left(message, 160) AS message
       FROM msms_requests WHERE owner=$1 AND location_id=$2 ORDER BY id DESC LIMIT $3`, [String(owner), loc, limit]);
     const ids = reqs.map((r) => r.id);
     const { rows: sends } = ids.length ? await pool.query('SELECT request_id, contact_name, number, is_primary, status, error, at FROM msms_sends WHERE request_id = ANY($1) ORDER BY id', [ids]) : { rows: [] };
