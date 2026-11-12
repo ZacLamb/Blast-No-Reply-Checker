@@ -61,6 +61,7 @@
   .note.bad { background: color-mix(in srgb, var(--red) 11%, transparent); color: var(--red); }
   .fr .ctl { flex: 1; justify-content: flex-end; }
   .fr .ctl input[type=text], .fr .ctl select { max-width: 320px; }
+  .fr.wrapsub .lbl { flex: 1 1 0; min-width: 0; } .fr.wrapsub .lbl small { white-space: normal; overflow: visible; text-overflow: clip; } .fr.wrapsub .ctl { flex: 0 0 auto; margin-left: auto; }
   .fr .lbl small { display: block; color: var(--sec); font-size: 12px; }
   .li .ts { color: var(--sec); font-size: 12.5px; white-space: nowrap; }
   .li .msg { color: var(--ter); }
@@ -299,8 +300,8 @@
     <div class="inner">
       <div class="page-head"><div><h1>Multi-number SMS</h1><p>HighLevel's bulk Send SMS and workflow texts only reach a contact's primary phone. Send the same text to their other numbers too: bulk-select contacts, add them to a workflow, and the workflow's webhook hands each one to us.</p></div></div>
       <div class="grp">
-        <div class="fr"><div class="lbl">Live sending<small id="msLiveSub">Off: requests run as a dry run, logged as "would send". Nothing is texted.</small></div><div class="ctl"><label class="sw"><input id="msLive" type="checkbox"><i></i></label></div></div>
-        <div class="fr"><div class="lbl">Number swap<small id="msSwapSub">Off: each number is texted with HighLevel's "send to this number" setting.</small></div><div class="ctl"><label class="sw"><input id="msSwap" type="checkbox"><i></i></label></div></div>
+        <div class="fr wrapsub"><div class="lbl">Live sending<small id="msLiveSub">Off: requests run as a dry run, logged as "would send". Nothing is texted.</small></div><div class="ctl"><label class="sw"><input id="msLive" type="checkbox"><i></i></label></div></div>
+        <div class="fr wrapsub"><div class="lbl">Number swap<small id="msSwapSub">Off: each number is texted with HighLevel's "send to this number" setting.</small></div><div class="ctl"><label class="sw"><input id="msSwap" type="checkbox"><i></i></label></div></div>
       </div>
       <div class="gh">1 · Webhook URL for this sub-account</div>
       <div class="grp"><div class="fr" style="flex-wrap:wrap;gap:8px"><input id="msUrl" type="text" readonly style="flex:1 1 320px;font-family:var(--mono,monospace);font-size:12.5px"><button class="btn tinted sm" id="msCopy">Copy</button><button class="btn tinted sm" id="msRotate" title="Makes a new URL; the old one stops working">New URL</button></div></div>
