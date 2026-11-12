@@ -102,3 +102,78 @@ test('Select all: the list filter is paged through with searchAfter until the en
   assert.strictEqual(calls[1].searchAfter[1], 'c499');
   await assert.rejects(ms.queueBulk('7', 'LOC1', { search: { filters: f }, message: 'Hi', expected: 10_000_000 }), /most one send can take/);
 });
+
+// ---- sending one contact's numbers (toNumber, and the swap fallback) ----
+// A pretend HighLevel with a provider like Sendillo's: every text goes to whatever the contact's primary phone is.
+function fakeGhl({ contact, dropExtrasOnPut = false, honorToNumber = false }) {
+  const st = { contact: { ...contact, additionalPhones: [...contact.additionalPhones] }, msgs: {}, log: [] };
+  st.ghl = async (token, method, path, version, body) => {
+    st.log.push(`${method} ${path}`);
+    if (method === 'GET' && /\/contacts\//.test(path)) return { contact: { ...st.contact, additionalPhones: [...st.contact.additionalPhones] } };
+    if (method === 'PUT' && /\/contacts\//.test(path)) {
+      st.contact.phone = body.phone;
+      st.contact.additionalPhones = dropExtrasOnPut ? [] : [...body.additionalPhones];
+      return { contact: st.contact };
+    }
+    if (method === 'POST' && /\/conversations\/messages$/.test(path)) {
+      const id = `m${Object.keys(st.msgs).length + 1}`;
+      st.msgs[id] = { id, status: 'delivered', to: honorToNumber ? body.toNumber : m.e164(st.contact.phone) };
+      return { messageId: id };
+    }
+    if (method === 'GET' && /\/conversations\/messages\//.test(path)) return st.msgs[path.split('/').pop()];
+    throw new Error('unexpected ' + method + ' ' + path);
+  };
+  return st;
+}
+const V = { CONTACTS: 'c', CONVERSATIONS: 'v' };
+const three = { phone: '(718) 419-0824', additionalPhones: ['617-877-5608', '347-522-4074'] };
+const common = (st, extra = {}) => ({
+  ghl: st.ghl, token: 't', contactId: 'ct1', contact: three, numbers: ['+17184190824', '+16178775608', '+13475224074'], text: 'hi', V, live: true,
+  sleep: async () => {}, saveRestore: async () => 1, doneRestore: async () => {}, ...extra,
+});
+
+test('swap: each number is texted in turn, then the contact is put back exactly as it was', async () => {
+  const st = fakeGhl({ contact: three });
+  let restored = null;
+  const r = await m.sendAll(common(st, { swap: true, doneRestore: async (id, ok) => { restored = ok; } }));
+  assert.deepStrictEqual(r.rows.map((x) => x.status), ['sent', 'sent', 'sent']);
+  assert.deepStrictEqual(Object.values(st.msgs).map((x) => x.to), ['+17184190824', '+16178775608', '+13475224074']);
+  assert.strictEqual(st.contact.phone, three.phone);
+  assert.deepStrictEqual(st.contact.additionalPhones, three.additionalPhones);
+  assert.strictEqual(restored, true);
+  assert.strictEqual(r.restoreFailed, false);
+});
+
+test('swap: the primary is texted without touching the contact when it is the only number', async () => {
+  const st = fakeGhl({ contact: three });
+  const r = await m.sendAll(common(st, { swap: true, numbers: ['+17184190824'] }));
+  assert.strictEqual(r.rows[0].status, 'sent');
+  assert.ok(!st.log.some((l) => l.startsWith('PUT')));
+});
+
+test('swap: if the original numbers cannot be confirmed back, it says so', async () => {
+  const st = fakeGhl({ contact: three, dropExtrasOnPut: true });
+  const r = await m.sendAll(common(st, { swap: true, numbers: ['+16178775608'] }));
+  assert.strictEqual(r.restoreFailed, true);
+});
+
+test('without swap, a provider that ignores toNumber is caught and logged as a failure', async () => {
+  const st = fakeGhl({ contact: three });   // sends everything to the primary
+  const r = await m.sendAll(common(st, { swap: false }));
+  assert.deepStrictEqual(r.rows.map((x) => x.status), ['sent', 'failed', 'failed']);
+  assert.match(r.rows[1].error, /sent it to \+17184190824, not \+16178775608/);
+  assert.ok(!st.log.some((l) => l.startsWith('PUT')));
+});
+
+test('without swap, a provider that honors toNumber passes the check', async () => {
+  const st = fakeGhl({ contact: three, honorToNumber: true });
+  const r = await m.sendAll(common(st, { swap: false }));
+  assert.deepStrictEqual(r.rows.map((x) => x.status), ['sent', 'sent', 'sent']);
+});
+
+test('dry run touches nothing', async () => {
+  const st = fakeGhl({ contact: three });
+  const r = await m.sendAll(common(st, { swap: true, live: false }));
+  assert.deepStrictEqual(r.rows.map((x) => x.status), ['would_send', 'would_send', 'would_send']);
+  assert.strictEqual(st.log.length, 0);
+});
