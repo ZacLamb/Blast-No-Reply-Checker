@@ -122,7 +122,9 @@ const cleanFrom = (v) => (v ? e164(v) : null);
 // by recoverRestores(), so a contact is never left with the wrong number.
 const PENDING_STATUS = /^(pending|queued|scheduled|sending)$/i;
 const sleepMs = (ms) => new Promise((r) => setTimeout(r, ms));
-const rawAdditional = (c) => (Array.isArray(c?.additionalPhones) ? c.additionalPhones : []).map((x) => (typeof x === 'string' ? x : x?.phone || x?.number || x?.value)).filter(Boolean);
+// HighLevel's update API wants additionalPhones as objects ({ phone, phoneLabel? }), never bare strings.
+const asPhoneObjects = (list) => (Array.isArray(list) ? list : []).map((x) => (typeof x === 'string' ? { phone: x } : x && x.phone ? { phone: x.phone, ...(x.phoneLabel ? { phoneLabel: x.phoneLabel } : {}) } : null)).filter(Boolean);
+const rawAdditional = (c) => asPhoneObjects(c?.additionalPhones);
 const sameNumbers = (a, b) => {
   const x = phonesOf(a), y = phonesOf(b);
   return x.primary === y.primary && JSON.stringify([...x.additional].sort()) === JSON.stringify([...y.additional].sort());
@@ -171,7 +173,7 @@ async function sendAll(o) {
       if (needSwap) {
         if (!restoreId) restoreId = await saveRestore(original);
         const others = allNums.filter((x) => x !== number);
-        try { await put({ phone: number, additionalPhones: others }); swapped = true; } catch (e) { swapped = true; throw e; }
+        try { await put({ phone: number, additionalPhones: others.map((x) => ({ phone: x })) }); swapped = true; } catch (e) { swapped = true; throw e; }
         if (!(await verifyPrimary(number))) { abort = 'Couldn\'t switch the contact\'s number safely, so nothing more was sent to this contact'; throw new Error(abort); }
       }
       const d = await ghl(token, 'POST', '/conversations/messages', V.CONVERSATIONS, { type: 'SMS', contactId, message: text, toNumber: number, ...(from ? { fromNumber: from } : {}) });
@@ -316,7 +318,7 @@ function create({ pool, ghl, hub, CONTACTS_VERSION, CONVERSATIONS_VERSION, log =
       try {
         const token = (await hub.credentialsFor(r.owner, r.location_id)).pit;
         const orig = r.original || {};
-        await ghl(token, 'PUT', `/contacts/${encodeURIComponent(r.contact_id)}`, CONTACTS_VERSION, { phone: orig.phone || '', additionalPhones: orig.additionalPhones || [] });
+        await ghl(token, 'PUT', `/contacts/${encodeURIComponent(r.contact_id)}`, CONTACTS_VERSION, { phone: orig.phone || '', additionalPhones: asPhoneObjects(orig.additionalPhones) });
         const c = (await ghl(token, 'GET', `/contacts/${encodeURIComponent(r.contact_id)}`, CONTACTS_VERSION)).contact;
         const ok = sameNumbers(c, { phone: orig.phone, additionalPhones: orig.additionalPhones });
         await pool.query('UPDATE msms_restores SET status=$2, note=$3, done_at=now() WHERE id=$1', [r.id, ok ? 'restored' : 'failed', ok ? 'Recovered after an interruption' : 'Recovery could not confirm the original numbers']);

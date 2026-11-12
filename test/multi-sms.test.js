@@ -111,6 +111,8 @@ function fakeGhl({ contact, dropExtrasOnPut = false, honorToNumber = false }) {
     st.log.push(`${method} ${path}`);
     if (method === 'GET' && /\/contacts\//.test(path)) return { contact: { ...st.contact, additionalPhones: [...st.contact.additionalPhones] } };
     if (method === 'PUT' && /\/contacts\//.test(path)) {
+      // HighLevel rejects bare strings in additionalPhones (this is the error Lenderfy returned).
+      if ((body.additionalPhones || []).some((x) => !x || typeof x !== 'object')) throw Object.assign(new Error('additionalPhones.0.each value in nested property additionalPhones must be either object or array'), { status: 400 });
       st.contact.phone = body.phone;
       st.contact.additionalPhones = dropExtrasOnPut ? [] : [...body.additionalPhones];
       return { contact: st.contact };
@@ -139,7 +141,7 @@ test('swap: each number is texted in turn, then the contact is put back exactly 
   assert.deepStrictEqual(r.rows.map((x) => x.status), ['sent', 'sent', 'sent']);
   assert.deepStrictEqual(Object.values(st.msgs).map((x) => x.to), ['+17184190824', '+16178775608', '+13475224074']);
   assert.strictEqual(st.contact.phone, three.phone);
-  assert.deepStrictEqual(st.contact.additionalPhones, three.additionalPhones);
+  assert.deepStrictEqual(st.contact.additionalPhones, [{ phone: '617-877-5608' }, { phone: '347-522-4074' }]);
   assert.strictEqual(restored, true);
   assert.strictEqual(r.restoreFailed, false);
 });
