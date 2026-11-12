@@ -114,6 +114,95 @@ function cleanSearch(search) {
 // "+1 (617) 944-2522" → E.164 for the From line, or null.
 const cleanFrom = (v) => (v ? e164(v) : null);
 
+// ---------- sending one contact's numbers ----------
+// Some SMS providers (Sendillo's HighLevel provider, for one) text the contact's primary phone no matter
+// what "toNumber" says. "Swap" mode works around that: make the number we want the contact's primary
+// phone, send, and put the original numbers back once every number is done. The original is saved
+// first, the swap is verified before sending, the restore is verified after, and a crash is cleaned up
+// by recoverRestores(), so a contact is never left with the wrong number.
+const PENDING_STATUS = /^(pending|queued|scheduled|sending)$/i;
+const sleepMs = (ms) => new Promise((r) => setTimeout(r, ms));
+const rawAdditional = (c) => (Array.isArray(c?.additionalPhones) ? c.additionalPhones : []).map((x) => (typeof x === 'string' ? x : x?.phone || x?.number || x?.value)).filter(Boolean);
+const sameNumbers = (a, b) => {
+  const x = phonesOf(a), y = phonesOf(b);
+  return x.primary === y.primary && JSON.stringify([...x.additional].sort()) === JSON.stringify([...y.additional].sort());
+};
+// Where HighLevel says a message actually went (E.164), or null when the response doesn't say.
+function destOf(msg) {
+  const m = msg?.message || msg?.msg || msg || {};
+  let to = m.to ?? m.phone ?? m.toNumber ?? m.meta?.to;
+  if (Array.isArray(to)) to = to[0];
+  return to ? e164(to) : null;
+}
+
+async function sendAll(o) {
+  const { ghl, token, contactId, contact, numbers, text, from, swap, live, V, sleep = sleepMs, saveRestore, doneRestore, settleTries = 15 } = o;
+  const rows = [];
+  const primary = phonesOf(contact).primary;
+  const original = { phone: contact.phone || '', additionalPhones: rawAdditional(contact) };
+  const allNums = [...(primary ? [primary] : []), ...phonesOf(contact).additional];
+  let restoreId = null, swapped = false, abort = null, fatal = null, restoreFailed = false;
+
+  const put = (body) => ghl(token, 'PUT', `/contacts/${encodeURIComponent(contactId)}`, V.CONTACTS, body);
+  const read = async () => (await ghl(token, 'GET', `/contacts/${encodeURIComponent(contactId)}`, V.CONTACTS)).contact;
+  const verifyPrimary = async (n) => {
+    for (let i = 0; i < 3; i++) { if (phonesOf(await read()).primary === n) return true; await sleep(800); }
+    return false;
+  };
+  const restore = async () => {
+    for (let i = 0; i < 3; i++) {
+      try {
+        await put({ phone: original.phone, additionalPhones: original.additionalPhones });
+        if (sameNumbers(await read(), contact)) return true;
+      } catch { /* retry */ }
+      await sleep(800);
+    }
+    return false;
+  };
+
+  for (const number of numbers) {
+    const row = { number, status: 'would_send', messageId: null, error: null };
+    rows.push(row);
+    if (!live) continue;
+    if (fatal) { row.status = 'failed'; row.error = fatal; continue; }
+    if (abort) { row.status = 'failed'; row.error = abort; continue; }
+    try {
+      const needSwap = swap && number !== primary;
+      if (needSwap) {
+        if (!restoreId) restoreId = await saveRestore(original);
+        const others = allNums.filter((x) => x !== number);
+        try { await put({ phone: number, additionalPhones: others }); swapped = true; } catch (e) { swapped = true; throw e; }
+        if (!(await verifyPrimary(number))) { abort = 'Couldn\'t switch the contact\'s number safely, so nothing more was sent to this contact'; throw new Error(abort); }
+      }
+      const d = await ghl(token, 'POST', '/conversations/messages', V.CONVERSATIONS, { type: 'SMS', contactId, message: text, toNumber: number, ...(from ? { fromNumber: from } : {}) });
+      row.messageId = d.messageId || d.msg?.id || null; row.status = 'sent';
+      if (row.messageId) {
+        // Let the provider take the message before the number changes back, then check where it went.
+        let m = null;
+        for (let i = 0; i < (needSwap ? settleTries : 1); i++) {
+          try { m = await ghl(token, 'GET', `/conversations/messages/${encodeURIComponent(row.messageId)}`, V.CONVERSATIONS); } catch { m = null; }
+          const st = m?.status || m?.message?.status || m?.msg?.status;
+          if (!needSwap || !st || !PENDING_STATUS.test(st)) break;
+          await sleep(1000);
+        }
+        const st = m?.status || m?.message?.status || m?.msg?.status;
+        const to = destOf(m);
+        if (to && to !== number) { row.status = 'failed'; row.error = `HighLevel sent it to ${to}, not ${number}`; }
+        else if (st && /^(failed|undelivered)$/i.test(st)) { row.status = 'failed'; row.error = `Provider reported: ${st}`; }
+      }
+    } catch (e) {
+      row.status = 'failed'; row.error = String(e.message || e).replace(/^GHL returned \d+: /, '').slice(0, 300);
+      if (e.status === 401 || e.status === 403) fatal = 'This sub-account\'s connection can\'t send messages (it needs Conversations › Send messages and Contacts › Edit). Reconnect it on the RGS Tools hub.';
+    }
+  }
+  if (swapped) {
+    const ok = await restore().catch(() => false);
+    if (restoreId) await doneRestore(restoreId, ok, ok ? null : 'Could not confirm the contact\'s original numbers were put back');
+    restoreFailed = !ok;
+  }
+  return { rows, fatal, restoreFailed };
+}
+
 // ---------- queue + worker ----------
 
 function create({ pool, ghl, hub, CONTACTS_VERSION, CONVERSATIONS_VERSION, log = console }) {
@@ -146,20 +235,30 @@ function create({ pool, ghl, hub, CONTACTS_VERSION, CONVERSATIONS_VERSION, log =
       status TEXT NOT NULL,                         -- sent | failed | would_send
       message_id TEXT, error TEXT, at TIMESTAMPTZ NOT NULL DEFAULT now())`);
     await pool.query('CREATE INDEX IF NOT EXISTS msms_sends_loc ON msms_sends (owner, location_id, at DESC)');
+    await pool.query('ALTER TABLE msms_hooks ADD COLUMN IF NOT EXISTS swap BOOLEAN NOT NULL DEFAULT false');
+    // A contact whose number is temporarily swapped has its original numbers saved here until they're confirmed back.
+    await pool.query(`CREATE TABLE IF NOT EXISTS msms_restores (
+      id BIGSERIAL PRIMARY KEY, owner TEXT NOT NULL, location_id TEXT NOT NULL, contact_id TEXT NOT NULL, original JSONB NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',        -- pending | restored | failed
+      note TEXT, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), done_at TIMESTAMPTZ)`);
   }
 
   // ---- hook URLs (one per user + sub-account) ----
   async function hookFor(owner, locationId) {
-    const { rows: [r] } = await pool.query('SELECT key, live FROM msms_hooks WHERE owner=$1 AND location_id=$2', [String(owner), locationId]);
+    const { rows: [r] } = await pool.query('SELECT key, live, swap FROM msms_hooks WHERE owner=$1 AND location_id=$2', [String(owner), locationId]);
     if (r) return r;
     const key = crypto.randomBytes(18).toString('base64url');
     const { rows: [n] } = await pool.query(`INSERT INTO msms_hooks (key, owner, location_id) VALUES ($1,$2,$3)
-      ON CONFLICT (owner, location_id) DO UPDATE SET owner=EXCLUDED.owner RETURNING key, live`, [key, String(owner), locationId]);
+      ON CONFLICT (owner, location_id) DO UPDATE SET owner=EXCLUDED.owner RETURNING key, live, swap`, [key, String(owner), locationId]);
     return n;
   }
   async function setLive(owner, locationId, live) {
     await hookFor(owner, locationId);
     await pool.query('UPDATE msms_hooks SET live=$3 WHERE owner=$1 AND location_id=$2', [String(owner), locationId, !!live]);
+  }
+  async function setSwap(owner, locationId, swap) {
+    await hookFor(owner, locationId);
+    await pool.query('UPDATE msms_hooks SET swap=$3 WHERE owner=$1 AND location_id=$2', [String(owner), locationId, !!swap]);
   }
   async function rotate(owner, locationId) {
     const key = crypto.randomBytes(18).toString('base64url');
@@ -186,12 +285,14 @@ function create({ pool, ghl, hub, CONTACTS_VERSION, CONVERSATIONS_VERSION, log =
 
   // ---- worker: one loop per sub-account, oldest first, at GHL's pace (ghl() throttles per token) ----
   const running = new Set();
+  const inFlight = new Set();   // contacts whose numbers are swapped right now
   const expanding = new Set();
   const fieldKeys = new Map();   // locationId -> { at, map: { fieldId: key } }
   let timer = null;
   function kick() { if (!timer) timer = setTimeout(async () => { timer = null; await tick().catch((e) => log.error('[msms] tick', e)); }, 200); }
 
   async function tick() {
+    await recoverRestores().catch((e) => log.error('[msms] recover', e.message));
     const { rows: bs } = await pool.query(`SELECT id FROM msms_batches WHERE status='expanding' ORDER BY id`);
     for (const { id } of bs) {
       if (expanding.has(id)) continue;
@@ -204,6 +305,22 @@ function create({ pool, ghl, hub, CONTACTS_VERSION, CONVERSATIONS_VERSION, log =
       if (running.has(k)) continue;
       running.add(k);
       drain(owner, loc).catch((e) => log.error('[msms] drain', loc, e.message)).finally(() => running.delete(k));
+    }
+  }
+
+  // Anything left swapped after a crash or redeploy: put the original numbers back.
+  async function recoverRestores() {
+    const { rows } = await pool.query(`SELECT * FROM msms_restores WHERE status='pending' AND created_at < now() - interval '90 seconds' ORDER BY id LIMIT 20`);
+    for (const r of rows) {
+      if (inFlight.has(r.contact_id)) continue;
+      try {
+        const token = (await hub.credentialsFor(r.owner, r.location_id)).pit;
+        const orig = r.original || {};
+        await ghl(token, 'PUT', `/contacts/${encodeURIComponent(r.contact_id)}`, CONTACTS_VERSION, { phone: orig.phone || '', additionalPhones: orig.additionalPhones || [] });
+        const c = (await ghl(token, 'GET', `/contacts/${encodeURIComponent(r.contact_id)}`, CONTACTS_VERSION)).contact;
+        const ok = sameNumbers(c, { phone: orig.phone, additionalPhones: orig.additionalPhones });
+        await pool.query('UPDATE msms_restores SET status=$2, note=$3, done_at=now() WHERE id=$1', [r.id, ok ? 'restored' : 'failed', ok ? 'Recovered after an interruption' : 'Recovery could not confirm the original numbers']);
+      } catch (e) { log.error('[msms] recover', r.id, e.message); }
     }
   }
 
@@ -243,22 +360,21 @@ function create({ pool, ghl, hub, CONTACTS_VERSION, CONVERSATIONS_VERSION, log =
       if (!numbers.length) { await done('skipped', r.mode === 'additional' ? 'No additional numbers' : 'No valid phone numbers'); continue; }
       const text = render(r.message, contact, /\{\{/.test(r.message) ? await customKeys(token, loc) : {});
       const primary = phonesOf(contact).primary;
-      let sent = 0, failed = 0, fatal = null;
-      for (const number of numbers) {
-        const row = { status: 'would_send', messageId: null, error: null };
-        if (r.live && !fatal) {
-          try {
-            const d = await ghl(token, 'POST', '/conversations/messages', CONVERSATIONS_VERSION, { type: 'SMS', contactId: r.contact_id, message: text, toNumber: number, ...(r.from_number ? { fromNumber: r.from_number } : {}) });
-            row.status = 'sent'; row.messageId = d.messageId || d.msg?.id || null; sent++;
-          } catch (e) {
-            row.status = 'failed'; row.error = String(e.message || e).replace(/^GHL returned \d+: /, '').slice(0, 300); failed++;
-            if (e.status === 401 || e.status === 403) fatal = 'This sub-account\'s connection can\'t send messages (it needs Conversations › Send messages). Reconnect it on the RGS Tools hub.';
-          }
-        } else if (r.live && fatal) { row.status = 'failed'; row.error = fatal; failed++; }
+      const hk = await hookFor(owner, loc);
+      const V = { CONTACTS: CONTACTS_VERSION, CONVERSATIONS: CONVERSATIONS_VERSION };
+      let restoreRowId = null;
+      const res = await sendAll({ ghl, token, contactId: r.contact_id, contact, numbers, text, from: r.from_number, swap: !!hk.swap, live: r.live, V,
+        saveRestore: async (orig) => { const { rows: [x] } = await pool.query('INSERT INTO msms_restores (owner, location_id, contact_id, original) VALUES ($1,$2,$3,$4) RETURNING id', [owner, loc, r.contact_id, JSON.stringify(orig)]); restoreRowId = x.id; inFlight.add(r.contact_id); return x.id; },
+        doneRestore: async (id, ok, note) => { inFlight.delete(r.contact_id); await pool.query('UPDATE msms_restores SET status=$2, note=$3, done_at=now() WHERE id=$1', [id, ok ? 'restored' : 'failed', note]); } });
+      let sent = 0, failed = 0;
+      for (const row of res.rows) {
+        if (row.status === 'sent') sent++; else if (row.status === 'failed') failed++;
         await pool.query(`INSERT INTO msms_sends (request_id, owner, location_id, contact_id, contact_name, number, is_primary, status, message_id, error)
-          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, [r.id, owner, loc, r.contact_id, name, number, number === primary, row.status, row.messageId, row.error]);
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, [r.id, owner, loc, r.contact_id, name, row.number, row.number === primary, row.status, row.messageId, row.error]);
       }
-      await done(r.live ? (sent ? 'done' : 'failed') : 'done', r.live ? `${sent} sent${failed ? `, ${failed} failed` : ''}` : `Dry run: would text ${numbers.length}`);
+      const fatal = res.fatal || (res.restoreFailed ? 'Couldn\'t confirm a contact\'s original numbers were put back, so number swap was switched off. Check this contact: ' + r.contact_id : null);
+      if (res.restoreFailed) await pool.query('UPDATE msms_hooks SET swap=false WHERE owner=$1 AND location_id=$2', [owner, loc]);
+      await done(r.live ? (sent ? 'done' : 'failed') : 'done', r.live ? `${sent} sent${failed ? `, ${failed} failed` : ''}${res.restoreFailed ? ' · RESTORE FAILED' : ''}` : `Dry run: would text ${numbers.length}`);
       if (fatal) {
         await pool.query(`UPDATE msms_requests SET status='failed', note=$3, done_at=now() WHERE owner=$1 AND location_id=$2 AND status='queued'`, [owner, loc, fatal]);
         return;
@@ -350,7 +466,7 @@ function create({ pool, ghl, hub, CONTACTS_VERSION, CONVERSATIONS_VERSION, log =
       FROM msms_requests WHERE owner=$1 AND location_id=$2`, [String(owner), loc]);
     const { rows: [s] } = await pool.query(`SELECT count(*) FILTER (WHERE status='sent')::int AS sent, count(*) FILTER (WHERE status='failed')::int AS failed,
       count(*) FILTER (WHERE status='would_send')::int AS would FROM msms_sends WHERE owner=$1 AND location_id=$2 AND at > now() - interval '7 days'`, [String(owner), loc]);
-    return { hookKey: hook.key, live: hook.live, requests: q, sends: s };
+    return { hookKey: hook.key, live: hook.live, swap: !!hook.swap, requests: q, sends: s };
   }
   async function recent(owner, loc, limit = 200) {
     const { rows: reqs } = await pool.query(`SELECT id, contact_id, contact_name, mode, live, status, note, created_at, done_at, left(message, 160) AS message
@@ -377,7 +493,7 @@ function create({ pool, ghl, hub, CONTACTS_VERSION, CONVERSATIONS_VERSION, log =
   }
 
   setInterval(() => tick().catch(() => {}), 15000).unref?.();   // picks up anything left after a restart
-  return { init, receive, hookFor, setLive, rotate, summary, recent, sendsCsv, test, kick, queueBulk, status };
+  return { init, receive, hookFor, setLive, setSwap, rotate, summary, recent, sendsCsv, test, kick, queueBulk, status };
 }
 
-module.exports = { create, e164, phonesOf, numbersFor, onDnd, render, parseHook, cleanSearch, MODES };
+module.exports = { create, e164, phonesOf, numbersFor, onDnd, render, parseHook, cleanSearch, sendAll, destOf, MODES };

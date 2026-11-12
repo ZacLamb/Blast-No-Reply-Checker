@@ -300,6 +300,7 @@
       <div class="page-head"><div><h1>Multi-number SMS</h1><p>HighLevel's bulk Send SMS and workflow texts only reach a contact's primary phone. Send the same text to their other numbers too: bulk-select contacts, add them to a workflow, and the workflow's webhook hands each one to us.</p></div></div>
       <div class="grp">
         <div class="fr"><div class="lbl">Live sending<small id="msLiveSub">Off: requests run as a dry run, logged as "would send". Nothing is texted.</small></div><div class="ctl"><label class="sw"><input id="msLive" type="checkbox"><i></i></label></div></div>
+        <div class="fr"><div class="lbl">Number swap<small id="msSwapSub">Off: each number is texted with HighLevel's "send to this number" setting.</small></div><div class="ctl"><label class="sw"><input id="msSwap" type="checkbox"><i></i></label></div></div>
       </div>
       <div class="gh">1 · Webhook URL for this sub-account</div>
       <div class="grp"><div class="fr" style="flex-wrap:wrap;gap:8px"><input id="msUrl" type="text" readonly style="flex:1 1 320px;font-family:var(--mono,monospace);font-size:12.5px"><button class="btn tinted sm" id="msCopy">Copy</button><button class="btn tinted sm" id="msRotate" title="Makes a new URL; the old one stops working">New URL</button></div></div>
@@ -735,6 +736,8 @@ async function msLoad() {
   catch (e) { $('msList').innerHTML = `<div class="li"><div class="main sec">${esc(e.message)}</div></div>`; return; }
   $('msUrl').value = d.hookUrl; $('msLive').checked = d.live;
   $('msLiveSub').textContent = d.live ? 'On: workflow requests text real numbers.' : 'Off: requests run as a dry run, logged as "would send". Nothing is texted.';
+  $('msSwap').checked = !!d.swap;
+  $('msSwapSub').textContent = d.swap ? 'On: for providers that always text the primary phone (like Sendillo), each number is briefly made the primary, texted, then everything is put back.' : 'Off: each number is texted with HighLevel\'s "send to this number" setting. Turn on if your SMS provider only texts the primary phone.';
   $('msCsv').href = '/api/multi-sms/sends.csv?locationId=' + encodeURIComponent(c.locationId);
   const q = d.requests, s = d.sends;
   $('msStats').textContent = `Last 7 days: ${s.sent} sent · ${s.failed} failed · ${s.would} dry-run · ${q.skipped7} contacts skipped${q.queued ? ` · ${q.queued} waiting` : ''}`;
@@ -747,6 +750,11 @@ $('msLive').onchange = async () => {
   const on = $('msLive').checked;
   if (on && !confirm('Turn on live sending? Workflow requests will text every number they list. Run a test on one of your own contacts first.')) { $('msLive').checked = false; return; }
   try { await post('/api/multi-sms/live', { locationId: creds().locationId, live: on }); msLoad(); } catch (e) { $('msLive').checked = !on; show($('msStatus'), e.message); }
+};
+$('msSwap').onchange = async () => {
+  const on = $('msSwap').checked;
+  if (on && !confirm('Turn on number swap? While a contact is being texted its phone numbers are briefly rearranged (the number being texted becomes the primary), then put back exactly as they were. Contact-changed workflows can fire. Test it on one contact first.')) { $('msSwap').checked = false; return; }
+  try { await post('/api/multi-sms/swap', { locationId: creds().locationId, swap: on }); msLoad(); } catch (e) { $('msSwap').checked = !on; show($('msStatus'), e.message); }
 };
 $('msCopy').onclick = () => { navigator.clipboard.writeText($('msUrl').value); RGS.toast('Webhook URL copied'); };
 $('msCopyBody').onclick = () => { navigator.clipboard.writeText($('msBody').textContent); RGS.toast('Body copied'); };

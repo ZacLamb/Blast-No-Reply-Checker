@@ -629,6 +629,11 @@ app.post('/api/multi-sms/live', wrap(async (req, res) => {
   await msms.setLive(req.hubUser.id, loc, !!req.body.live);
   res.json({ ok: true, live: !!req.body.live });
 }));
+app.post('/api/multi-sms/swap', wrap(async (req, res) => {
+  const loc = await msmsLoc(req, res); if (!loc) return;
+  await msms.setSwap(req.hubUser.id, loc, !!req.body.swap);
+  res.json({ ok: true, swap: !!req.body.swap });
+}));
 app.post('/api/multi-sms/rotate', wrap(async (req, res) => {
   const loc = await msmsLoc(req, res); if (!loc) return;
   res.json({ hookUrl: hookUrl(req, await msms.rotate(req.hubUser.id, loc)) });
