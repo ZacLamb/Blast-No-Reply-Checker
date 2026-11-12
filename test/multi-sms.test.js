@@ -19,6 +19,10 @@ test('numbers per mode, deduped, primary first, invalid dropped', () => {
   assert.deepStrictEqual(m.numbersFor(c, 'additional'), ['+16175550000', '+17745550001']);
   assert.deepStrictEqual(m.numbersFor(c, 'all'), ['+15085551234', '+16175550000', '+17745550001']);
   assert.deepStrictEqual(m.numbersFor({ additionalPhones: ['6175550000'] }, 'all'), ['+16175550000']);
+  assert.deepStrictEqual(m.numbersFor(c, 'numbers', undefined, ['+17745550001']), ['+17745550001']);
+  assert.deepStrictEqual(m.numbersFor(c, 'numbers', undefined, ['(617) 555-0000', '+19995550000', '+15085551234']), ['+15085551234', '+16175550000']);
+  assert.deepStrictEqual(m.numbersFor(c, 'numbers'), []);
+  assert.strictEqual(m.parseHook({ contactId: 'a', mode: 'numbers' }).mode, null);
 });
 
 test('DND skips the whole contact', () => {

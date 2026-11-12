@@ -579,7 +579,7 @@ function fromHub(req, res, next) {
 app.post('/internal/multi-sms/queue', express.json({ limit: '1mb' }), fromHub, wrap(async (req, res) => {
   try {
     const b = req.body || {};
-    res.json(await msms.queueBulk(req.msmsOwner, req.msmsLoc, { contactIds: b.contactIds, search: b.search, message: b.message, mode: b.mode, fromNumber: b.fromNumber, source: b.source, expected: b.expected }));
+    res.json(await msms.queueBulk(req.msmsOwner, req.msmsLoc, { contactIds: b.contactIds, search: b.search, message: b.message, mode: b.mode, fromNumber: b.fromNumber, source: b.source, expected: b.expected, numbers: b.numbers }));
   } catch (e) {
     if (!e.status) throw e;
     res.status(e.status).json({ error: e.message });
