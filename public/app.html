@@ -307,12 +307,13 @@
       <div class="grp"><div class="fr" style="flex-wrap:wrap;gap:8px"><input id="msUrl" type="text" readonly style="flex:1 1 320px;font-family:var(--mono,monospace);font-size:12.5px"><button class="btn tinted sm" id="msCopy">Copy</button><button class="btn tinted sm" id="msRotate" title="Makes a new URL; the old one stops working">New URL</button></div></div>
       <div class="gh">2 · In the workflow</div>
       <div class="grp"><div class="fr" style="display:block;font-size:13px;line-height:1.55">
-        Add a <b>Custom Webhook</b> action: method <b>POST</b>, the URL above, content type <b>JSON</b>, and this body. Put your text in <code>message</code> (merge fields like <code>{{contact.first_name}}</code> work). <code>mode</code> is <b>all</b> (every number), <b>additional</b> (every number except the primary, pair it with a normal Send SMS step) or <b>primary</b>.
+        Add a <b>Custom Webhook</b> action: method <b>POST</b>, the URL above, content type <b>JSON</b>, and this body. Put your text in <code>message</code> (merge fields like <code>{{contact.first_name}}</code> work). <code>asOwner</code> (optional) set to <b>true</b> sends each text as the contact's assigned user, so Sendillo uses that rep's number. <code>mode</code> is <b>all</b> (every number), <b>additional</b> (every number except the primary, pair it with a normal Send SMS step) or <b>primary</b>.
         <pre id="msBody" style="margin:8px 0 0;background:var(--fill);border-radius:8px;padding:10px;font-size:12px;white-space:pre-wrap">{
   "contactId": "{{contact.id}}",
   "locationId": "{{location.id}}",
   "message": "Hi {{contact.first_name}}, ...",
-  "mode": "additional"
+  "mode": "all",
+  "asOwner": "true"
 }</pre>
         <div style="margin-top:8px"><button class="btn tinted sm" id="msCopyBody">Copy body</button></div>
         <p class="sec" style="margin:10px 0 0;font-size:12.5px">Contacts on Do Not Disturb (or tagged STOP) are skipped on every number. Numbers are cleaned to +1… format, duplicates and invalid numbers are dropped, and texts go out at HighLevel's rate limit.</p></div></div>
@@ -321,6 +322,7 @@
         <div class="fr"><div class="lbl">Contact<small>ID, or paste the contact's URL</small></div><div class="ctl"><input id="msTestContact" type="text" placeholder="Contact ID or URL"></div></div>
         <div class="fr"><div class="lbl">Message</div><div class="ctl"><input id="msTestMsg" type="text" placeholder="Test from RGS Tools: reply 1 if you got this"></div></div>
         <div class="fr"><div class="lbl">Numbers</div><div class="ctl"><select id="msTestMode"><option value="all">Every number</option><option value="additional">Only the additional numbers</option><option value="primary">Only the primary</option></select></div></div>
+        <div class="fr"><div class="lbl">Send as the contact's owner<small>Sends with the assigned user, so Sendillo uses that rep's number</small></div><div class="ctl"><label class="sw"><input id="msTestOwner" type="checkbox"><i></i></label></div></div>
         <div class="fr"><div class="lbl">Really send it<small>Off: shows which numbers would get it</small></div><div class="ctl"><label class="sw"><input id="msTestLive" type="checkbox"><i></i></label></div></div>
       </div>
       <div class="btnrow"><button class="btn lg" id="msTestGo">Run test</button><a class="btn tinted lg" id="msCsv" href="#">Download log (CSV)</a><span class="status" id="msStatus" style="margin:0"></span></div>
@@ -766,7 +768,7 @@ $('msRotate').onclick = async () => {
 $('msTestGo').onclick = async () => {
   show($('msStatus'), '');
   try {
-    await post('/api/multi-sms/test', { locationId: creds().locationId, contactId: $('msTestContact').value, message: $('msTestMsg').value, mode: $('msTestMode').value, live: $('msTestLive').checked });
+    await post('/api/multi-sms/test', { locationId: creds().locationId, contactId: $('msTestContact').value, message: $('msTestMsg').value, mode: $('msTestMode').value, live: $('msTestLive').checked, asOwner: $('msTestOwner').checked });
     RGS.toast($('msTestLive').checked ? 'Sending…' : 'Checking numbers…'); setTimeout(msLoad, 1200);
   } catch (e) { show($('msStatus'), e.message); }
 };

@@ -38,8 +38,8 @@ test('merge fields: standard, custom, unknown', () => {
 });
 
 test('webhook body: custom body, standard payload, customData, bad mode', () => {
-  assert.deepStrictEqual(m.parseHook({ contactId: 'c1', locationId: 'L1', message: 'hi', mode: 'ALL' }), { contactId: 'c1', locationId: 'L1', message: 'hi', mode: 'all' });
-  assert.deepStrictEqual(m.parseHook({ contact_id: 'c2', location: { id: 'L2' }, customData: { message: 'yo', mode: 'additional' } }), { contactId: 'c2', locationId: 'L2', message: 'yo', mode: 'additional' });
+  assert.deepStrictEqual(m.parseHook({ contactId: 'c1', locationId: 'L1', message: 'hi', mode: 'ALL' }), { contactId: 'c1', locationId: 'L1', message: 'hi', mode: 'all', asOwner: false });
+  assert.deepStrictEqual(m.parseHook({ contact_id: 'c2', location: { id: 'L2' }, customData: { message: 'yo', mode: 'additional' } }), { contactId: 'c2', locationId: 'L2', message: 'yo', mode: 'additional', asOwner: false });
   assert.strictEqual(m.parseHook({ contactId: 'c', message: 'x' }).mode, 'all');
   assert.strictEqual(m.parseHook({ contactId: 'c', message: 'x', mode: 'everyone' }).mode, null);
 });
@@ -123,6 +123,7 @@ function fakeGhl({ contact, dropExtrasOnPut = false, honorToNumber = false }) {
     }
     if (method === 'POST' && /\/conversations\/messages$/.test(path)) {
       const id = `m${Object.keys(st.msgs).length + 1}`;
+      (st.posts = st.posts || []).push(body);
       st.msgs[id] = { id, status: 'delivered', to: honorToNumber ? body.toNumber : m.e164(st.contact.phone) };
       return { messageId: id };
     }
@@ -182,4 +183,21 @@ test('dry run touches nothing', async () => {
   const r = await m.sendAll(common(st, { swap: true, live: false }));
   assert.deepStrictEqual(r.rows.map((x) => x.status), ['would_send', 'would_send', 'would_send']);
   assert.strictEqual(st.log.length, 0);
+});
+
+test('asOwner: the webhook flag is read from the body or customData, in any common spelling', () => {
+  assert.strictEqual(m.parseHook({ contactId: 'c', message: 'x', asOwner: 'true' }).asOwner, true);
+  assert.strictEqual(m.parseHook({ contactId: 'c', message: 'x', asOwner: true }).asOwner, true);
+  assert.strictEqual(m.parseHook({ contactId: 'c', message: 'x', customData: { as_owner: 'Yes' } }).asOwner, true);
+  assert.strictEqual(m.parseHook({ contactId: 'c', message: 'x', asOwner: 'false' }).asOwner, false);
+  assert.strictEqual(m.parseHook({ contactId: 'c', message: 'x' }).asOwner, false);
+});
+
+test('asOwner: every text carries the owner\'s userId; without it none does', async () => {
+  const withOwner = fakeGhl({ contact: three, honorToNumber: true });
+  await m.sendAll(common(withOwner, { userId: 'U9', swap: false }));
+  assert.deepStrictEqual(withOwner.posts.map((b) => b.userId), ['U9', 'U9', 'U9']);
+  const plain = fakeGhl({ contact: three, honorToNumber: true });
+  await m.sendAll(common(plain, { swap: false }));
+  assert.ok(plain.posts.every((b) => !('userId' in b)));
 });
