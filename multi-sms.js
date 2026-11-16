@@ -102,6 +102,7 @@ function parseHook(body) {
     locationId: String(pick(b.locationId, b.location_id, cd.locationId, b.location?.id) || '').trim(),
     message: String(pick(b.message, cd.message, b.body, '') || ''),
     mode: MODES.includes(mode) && mode !== 'numbers' ? mode : null, // 'numbers' only comes from the hub's picker
+    asOwner: /^(true|1|yes|y)$/i.test(String(pick(b.asOwner, b.as_owner, cd.asOwner, cd.as_owner, '') ?? '').trim()),
   };
 }
 
@@ -142,7 +143,7 @@ function destOf(msg) {
 }
 
 async function sendAll(o) {
-  const { ghl, token, contactId, contact, numbers, text, from, swap, live, V, sleep = sleepMs, saveRestore, doneRestore, settleTries = 15 } = o;
+  const { ghl, token, contactId, contact, numbers, text, from, userId, swap, live, V, sleep = sleepMs, saveRestore, doneRestore, settleTries = 15 } = o;
   const rows = [];
   const primary = phonesOf(contact).primary;
   const original = { phone: contact.phone || '', additionalPhones: rawAdditional(contact) };
@@ -180,7 +181,7 @@ async function sendAll(o) {
         try { await put({ phone: number, additionalPhones: others.map((x) => ({ phone: x })) }); swapped = true; } catch (e) { swapped = true; throw e; }
         if (!(await verifyPrimary(number))) { abort = 'Couldn\'t switch the contact\'s number safely, so nothing more was sent to this contact'; throw new Error(abort); }
       }
-      const d = await ghl(token, 'POST', '/conversations/messages', V.CONVERSATIONS, { type: 'SMS', contactId, message: text, toNumber: number, ...(from ? { fromNumber: from } : {}) });
+      const d = await ghl(token, 'POST', '/conversations/messages', V.CONVERSATIONS, { type: 'SMS', contactId, message: text, toNumber: number, ...(from ? { fromNumber: from } : {}), ...(userId ? { userId } : {}) });
       row.messageId = d.messageId || d.msg?.id || null; row.status = 'sent';
       if (row.messageId) {
         // Let the provider take the message before the number changes back, then check where it went.
@@ -224,6 +225,7 @@ function create({ pool, ghl, hub, CONTACTS_VERSION, CONVERSATIONS_VERSION, log =
       status TEXT NOT NULL DEFAULT 'queued',       -- queued | done | skipped | failed
       note TEXT, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), done_at TIMESTAMPTZ)`);
     await pool.query('ALTER TABLE msms_requests ADD COLUMN IF NOT EXISTS contact_name TEXT');   // shown in the log, also for skipped contacts
+    await pool.query('ALTER TABLE msms_requests ADD COLUMN IF NOT EXISTS as_owner BOOLEAN NOT NULL DEFAULT false');   // send as the contact's assigned user, so the provider picks that rep's number
     await pool.query('ALTER TABLE msms_requests ADD COLUMN IF NOT EXISTS from_number TEXT');    // send from this line (HighLevel's From picker)
     await pool.query('ALTER TABLE msms_requests ADD COLUMN IF NOT EXISTS batch_id BIGINT');
     await pool.query('ALTER TABLE msms_requests ADD COLUMN IF NOT EXISTS picked JSONB');          // mode "numbers": the numbers to text
@@ -285,8 +287,8 @@ function create({ pool, ghl, hub, CONTACTS_VERSION, CONVERSATIONS_VERSION, log =
     if (!p.message.trim()) return { status: 400, body: { error: 'Missing message.' } };
     if (!p.mode) return { status: 400, body: { error: `mode must be one of: ${MODES.join(', ')}.` } };
     if (p.message.length > 1600) return { status: 400, body: { error: 'Message is longer than 1,600 characters.' } };
-    const { rows: [r] } = await pool.query(`INSERT INTO msms_requests (hook_key, owner, location_id, contact_id, message, mode, live)
-      VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id`, [h.key, h.owner, h.location_id, p.contactId, p.message, p.mode, h.live]);
+    const { rows: [r] } = await pool.query(`INSERT INTO msms_requests (hook_key, owner, location_id, contact_id, message, mode, live, as_owner)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id`, [h.key, h.owner, h.location_id, p.contactId, p.message, p.mode, h.live, p.asOwner]);
     kick();
     return { status: 202, body: { ok: true, queued: r.id, live: h.live } };
   }
@@ -371,7 +373,7 @@ function create({ pool, ghl, hub, CONTACTS_VERSION, CONVERSATIONS_VERSION, log =
       const hk = await hookFor(owner, loc);
       const V = { CONTACTS: CONTACTS_VERSION, CONVERSATIONS: CONVERSATIONS_VERSION };
       let restoreRowId = null;
-      const res = await sendAll({ ghl, token, contactId: r.contact_id, contact, numbers, text, from: r.from_number, swap: !!hk.swap, live: r.live, V,
+      const res = await sendAll({ ghl, token, contactId: r.contact_id, contact, numbers, text, from: r.from_number, userId: r.as_owner ? (contact.assignedTo || null) : null, swap: !!hk.swap, live: r.live, V,
         saveRestore: async (orig) => { const { rows: [x] } = await pool.query('INSERT INTO msms_restores (owner, location_id, contact_id, original) VALUES ($1,$2,$3,$4) RETURNING id', [owner, loc, r.contact_id, JSON.stringify(orig)]); restoreRowId = x.id; inFlight.add(r.contact_id); return x.id; },
         doneRestore: async (id, ok, note) => { inFlight.delete(r.contact_id); await pool.query('UPDATE msms_restores SET status=$2, note=$3, done_at=now() WHERE id=$1', [id, ok ? 'restored' : 'failed', note]); } });
       let sent = 0, failed = 0;
@@ -382,7 +384,7 @@ function create({ pool, ghl, hub, CONTACTS_VERSION, CONVERSATIONS_VERSION, log =
       }
       const fatal = res.fatal || (res.restoreFailed ? 'Couldn\'t confirm a contact\'s original numbers were put back, so number swap was switched off. Check this contact: ' + r.contact_id : null);
       if (res.restoreFailed) await pool.query('UPDATE msms_hooks SET swap=false WHERE owner=$1 AND location_id=$2', [owner, loc]);
-      await done(r.live ? (sent ? 'done' : 'failed') : 'done', r.live ? `${sent} sent${failed ? `, ${failed} failed` : ''}${res.restoreFailed ? ' · RESTORE FAILED' : ''}` : `Dry run: would text ${numbers.length}`);
+      await done(r.live ? (sent ? 'done' : 'failed') : 'done', r.live ? `${sent} sent${failed ? `, ${failed} failed` : ''}${r.as_owner ? (contact.assignedTo ? ' · as owner' : ' · no owner assigned, sent without a rep') : ''}${res.restoreFailed ? ' · RESTORE FAILED' : ''}` : `Dry run: would text ${numbers.length}${r.as_owner ? (contact.assignedTo ? ' as the contact\'s owner' : ' (no owner assigned)') : ''}`);
       if (fatal) {
         await pool.query(`UPDATE msms_requests SET status='failed', note=$3, done_at=now() WHERE owner=$1 AND location_id=$2 AND status='queued'`, [owner, loc, fatal]);
         return;
@@ -494,10 +496,10 @@ function create({ pool, ghl, hub, CONTACTS_VERSION, CONVERSATIONS_VERSION, log =
   }
 
   // Queue one request straight from the tool page (the "Send a test" form): same path as the webhook.
-  async function test(owner, loc, { contactId, message, mode, live }) {
+  async function test(owner, loc, { contactId, message, mode, live, asOwner }) {
     const h = await hookFor(owner, loc);
-    const { rows: [r] } = await pool.query(`INSERT INTO msms_requests (hook_key, owner, location_id, contact_id, message, mode, live)
-      VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id`, [h.key, String(owner), loc, contactId, message, MODES.includes(mode) ? mode : 'all', !!live]);
+    const { rows: [r] } = await pool.query(`INSERT INTO msms_requests (hook_key, owner, location_id, contact_id, message, mode, live, as_owner)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id`, [h.key, String(owner), loc, contactId, message, MODES.includes(mode) ? mode : 'all', !!live, !!asOwner]);
     kick();
     return r.id;
   }

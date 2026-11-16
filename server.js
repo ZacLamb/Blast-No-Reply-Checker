@@ -643,7 +643,7 @@ app.post('/api/multi-sms/test', wrap(async (req, res) => {
   const contactId = String(req.body.contactId || '').trim().replace(/^.*\/contacts\/detail\//, '').replace(/[/?#].*$/, '');
   const message = String(req.body.message || '').trim();
   if (!contactId || !message) return res.status(400).json({ error: 'Enter a contact ID (or paste the contact\'s URL) and a message.' });
-  res.json({ queued: await msms.test(req.hubUser.id, loc, { contactId, message, mode: req.body.mode, live: !!req.body.live }) });
+  res.json({ queued: await msms.test(req.hubUser.id, loc, { contactId, message, mode: req.body.mode, live: !!req.body.live, asOwner: !!req.body.asOwner }) });
 }));
 app.get('/api/multi-sms/sends.csv', wrap(async (req, res) => {
   const loc = await msmsLoc(req, res); if (!loc) return;
